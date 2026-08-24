@@ -174,11 +174,49 @@ Magic links are single-use and expire in ~5 minutes. Move fast.
 
 | Concern | Fix |
 |---------|-----|
-| Screenshots | `aurora-screenshot /tmp/out.png` — NOT `import`/`gnome-screenshot` (AVX2 → SIGILL) |
+| Screenshots | `aurora-screenshot /tmp/out.png` — NOT `import`/`gnome-screenshot`. `import -window <WID>` triggers X11 bell on the target window (confirmed 2026-08-24). `aurora-screenshot` uses `xwd -root -silent` which is bell-free. |
 | Firefox focus | `xdotool windowactivate` (raises window) not `windowfocus` (doesn't raise) |
 | tmux send-keys | Use `C-m` not `Enter` |
 | IPv6 socket | CLI server listens on `[::1]` — curl needs `http://[::1]:PORT/` or `http://localhost:PORT/` |
 | Multiple Firefox WIDs | `xdotool search --class "firefox" \| tail -1` for the main window |
+| Session cookie conflict | If Firefox is logged in as wrong account, open a **private window** (`ctrl+shift+p`) instead of switching accounts — avoids the stuck-logout-page failure mode |
+
+---
+
+## Per-call window activation (critical)
+
+Between any two Bash tool calls, window focus may have changed: another agent, another automation, or the human typing can steal focus. **Every Bash tool call that touches Firefox must re-activate the window at the start of that call.**
+
+```bash
+# Wrong — assumes previous call's windowactivate is still active:
+# call 1: xdotool windowactivate --sync $WID
+# ... tool call boundary ...
+# call 2: xdotool key --window $WID ctrl+v   # may go to wrong window
+
+# Right — every call re-activates:
+# call 2: xdotool windowactivate --sync $WID && sleep 0.2 && xdotool key --window $WID ctrl+v
+```
+
+This is not paranoia. It is observed behavior on a tmux machine with concurrent agents.
+
+---
+
+## Tab management (critical)
+
+You launched ONE tab (LOCAL URL → your private window). That is the only tab you own.
+
+- Old tabs from previous auth attempts show stale "You can now close this window." — **ignore them entirely**
+- The OAuth success page loads in **the tab you most recently navigated LOCAL_URL into**
+- When you see "You can now close this window" in YOUR tab → run `claude auth status` immediately
+- Do NOT click to other tabs to "check what's there" — you will lose your place
+
+---
+
+## Focus-stealing — Level 0 limitation
+
+`xdotool windowactivate` raises Firefox to the foreground. If the human is typing in another window at that moment, their keystrokes go to Firefox. This is Level 0 (basic xdotool automation).
+
+**Level 1 upgrade:** Replace Firefox with `chromium --headless=new` + CDP, or Playwright in headless mode. No focus steal, full automation. The LOCAL URL flow works identically in headless Chrome — only the magic-link step requires a visible browser if the link must be clicked.
 
 ---
 
