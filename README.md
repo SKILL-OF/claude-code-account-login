@@ -1,8 +1,12 @@
 # claude-code-account-login
 
-Canonical agent procedure for switching the `claude` CLI account on a desktop machine with Firefox.
+Canonical agent procedure for switching the `claude` CLI account on a desktop machine, whether the
+GUI-automation layer is Linux/xdotool or Windows/UI-Automation. The core OAuth fact (below) is
+platform-independent; only the "drive the browser" mechanics differ per platform section.
 
-Validated on: aurora@aurora (Kali Linux, AMD Athlon 2850e, Firefox ESR, tmux). Took one full workday to derive. Do not improvise.
+Validated on:
+- **aurora@aurora** (Kali Linux, AMD Athlon 2850e, Firefox ESR, tmux, xdotool). Took one full workday to derive. Do not improvise.
+- **ottopoet-thesean@ottopoet-thesean** (Windows 11, Firefox, PowerShell + Windows UI Automation). See the Windows-specific section below — this machine uses Firefox, not Chrome, for account-login automation (Chrome triggers Cloudflare's bot-verification wall on a fresh/disposable profile; Firefox already carries a real, trusted session).
 
 ---
 
@@ -179,6 +183,114 @@ Magic links are single-use and expire in ~5 minutes. Move fast.
 | tmux send-keys | Use `C-m` not `Enter` |
 | IPv6 socket | CLI server listens on `[::1]` — curl needs `http://[::1]:PORT/` or `http://localhost:PORT/` |
 | Multiple Firefox WIDs | `xdotool search --class "firefox" \| tail -1` for the main window |
+
+---
+
+## Windows variant (PowerShell + UI Automation)
+
+Same core OAuth fact applies (LOCAL url vs MANUAL url). The browser-driving mechanics
+differ completely — and are more robust than the Linux/xdotool approach, because Windows
+UI Automation reads the OS accessibility tree directly instead of guessing pixel
+coordinates from a screenshot.
+
+**Do not pixel-hunt from screenshots.** It looks tempting (screenshot → eyeball coordinate
+→ click) but fails for real, repeatable reasons: DPI/monitor scaling, negative window
+coordinates on secondary monitors, and image-viewer tools that silently display a resized
+copy of the saved file (so eyeballed coordinates don't match the actual pixel grid). Use
+UI Automation instead — it finds elements by name/role and returns real, absolute-screen
+bounding rectangles.
+
+### 1 — Find the real listening port
+
+```powershell
+# Start the login process (as its own foreground process, NOT inside your own interactive
+# Claude Code pane — /login there is an unrecoverable interactive menu, see the warning below)
+claude auth login --claudeai --email YOUR@EMAIL 2>&1 | Tee-Object -FilePath C:\temp\auth-login.log
+```
+
+```powershell
+# From your agent's own shell, find the process and its actual listening port —
+# don't assume; cross-reference the exact command line, since other processes may also
+# be listening on unrelated ports.
+$authProc = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*auth login*" }
+$authProc.ProcessId
+# then: netstat -ano | findstr LISTENING, cross-reference the PID that owns a 127.0.0.1 or [::1] port
+```
+
+### 2 — Reconstruct the LOCAL URL
+
+Same string substitution as the Linux variant: swap only `redirect_uri` from
+`https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback` to
+`http%3A%2F%2Flocalhost%3A<PORT>%2Fcallback`. Keep `code_challenge`/`state` verbatim from
+the same process's own printed output — a stale or mismatched value fails PKCE validation.
+
+### 3 — Drive the browser via UI Automation, not xdotool/pixel-clicks
+
+```powershell
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+$proc = Get-Process -Id $firefoxPid   # or chrome, or any window
+$root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
+
+# Find an element by its accessible name — no coordinate guessing
+$condition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty, "Authorize")
+$element = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+
+# Prefer InvokePattern — works for most native controls and many web buttons
+$pattern = $null
+if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+    $pattern.Invoke()
+} else {
+    # Fallback: BoundingRectangle is already in ABSOLUTE SCREEN coordinates —
+    # do NOT add the window's Left/Top offset (that's only needed for screenshot crops).
+    $rect = $element.Current.BoundingRectangle
+    $centerX = [int]($rect.X + $rect.Width / 2)
+    $centerY = [int]($rect.Y + $rect.Height / 2)
+    # Real OS-level click via user32.dll SetCursorPos + mouse_event (P/Invoke) —
+    # indistinguishable from human input, works where InvokePattern is silently ignored
+    # by a web app's raw-mouse-event click handler.
+}
+```
+
+To list what's actually on a page (buttons, links, account tiles) without a screenshot at
+all:
+
+```powershell
+$btnCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Button)
+$root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCondition) |
+    ForEach-Object { $_.Current.Name }
+```
+
+### 4 — Prefer an already-authenticated browser session over any credential entry
+
+If the target account already has a cached Google/SSO session in the browser (check via
+UI Automation for a `ListItem` control matching the account email, on the "Choose an
+account" page), select that tile — this completes the whole flow with **zero password
+entry, zero secrets in agent context**, matching the standing rule that a human types
+passwords, never an agent. Only fall back to a magic-link/password flow (see the Linux
+section above — the technique transfers directly) if no cached session exists.
+
+### 5 — Verify
+
+```powershell
+Start-Sleep -Seconds 3
+claude auth status
+# Expect: "email": "YOUR@EMAIL", "loggedIn": true
+```
+
+### Machine-specific notes (ottopoet-thesean@ottopoet-thesean)
+
+| Concern | Fix |
+|---------|-----|
+| Never queue `/login` into your own interactive Claude Code pane | It's a genuine multi-step interactive menu with no external watcher for your own pane — you can queue text into your own pane between turns, but nothing drives a live multi-step UI once queued. Run `claude auth login` as a separate foreground process instead. |
+| Fresh/disposable browser profiles trigger Cloudflare Turnstile | Do not try to defeat it — that's a real anti-bot check, not a bug. Use a browser with genuine history (the human's own Firefox/Chrome), not a throwaway automation profile. |
+| Chrome vs Firefox | This machine's Chrome had no cached session for the target account and a copied/disposable Chrome profile hit Cloudflare's wall; Firefox already had a real, trusted, logged-in session — use whichever browser the human actually uses day-to-day. |
+| Window position math | `AutomationElement.BoundingRectangle` is absolute screen coordinates; a screenshot crop's coordinates are window-relative. Mixing the two conventions silently produces wrong click targets. |
+| `InvokePattern.Invoke()` sometimes does nothing | Some web-app buttons bind click handlers to raw mouse events only. If invoking a pattern produces no visible state change, fall back to a real `mouse_event` click at the element's UIA-derived center. |
 
 ---
 
