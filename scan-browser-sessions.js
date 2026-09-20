@@ -2,25 +2,47 @@
 /**
  * scan-browser-sessions.js
  *
- * Finds which browsers on this machine have which Google (or other) accounts
- * pre-populated, based on profile metadata and Preferences files.
- * OS-agnostic: works on Windows, macOS, Linux without hardcoding usernames or paths.
+ * Detects which browsers on this machine have Google accounts pre-populated,
+ * at two distinct layers:
+ *
+ *   Layer 1 — profile metadata (fast, offline, INCOMPLETE):
+ *     Reads Chrome/Brave/Edge/Firefox profile sign-in files. Finds the account
+ *     that "owns" each browser profile. MISSES accounts active via session
+ *     cookies that are not the profile-owning account.
+ *
+ *   Layer 2 — session cookies (ground truth, requires --cookies flag):
+ *     Reads the SQLite Cookies database in each browser profile. Detects
+ *     presence of accounts.google.com session cookies (APISID, SAPISID, SID…).
+ *     Cannot resolve email addresses — cookie values are DPAPI-encrypted on
+ *     Windows. Reports "has active Google sessions — navigate to
+ *     accounts.google.com to see which accounts."
+ *
+ * DO NOT confuse these layers. Victor's ground truth (a screenshot of Brave's
+ * Google "Choose an account" picker showing ottopoet.thesean@gmail.com) proved
+ * Layer 1 was wrong: Brave's profile metadata said "no Google account" but its
+ * session cookies had two active accounts. Layer 1 looks at the wrong thing.
  *
  * Usage:
- *   node scan-browser-sessions.js                    # list all accounts in all browsers
- *   node scan-browser-sessions.js --find EMAIL       # find which browser has EMAIL
- *   node scan-browser-sessions.js --json             # machine-readable output
+ *   node scan-browser-sessions.js                    # Layer 1 only
+ *   node scan-browser-sessions.js --cookies          # Layer 1 + Layer 2
+ *   node scan-browser-sessions.js --find EMAIL       # Layer 1 search for email
+ *   node scan-browser-sessions.js --cookies --json   # machine-readable
  *
- * Output: browser, profile name, email, profile path
+ * Cross-platform: no hardcoded usernames or paths (uses os.homedir(),
+ * process.env.LOCALAPPDATA, XDG_CONFIG_HOME). Works on Windows, macOS, Linux.
  */
+
+'use strict';
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 
 const args = process.argv.slice(2);
 const findEmail = args.includes('--find') ? args[args.indexOf('--find') + 1] : null;
 const jsonOutput = args.includes('--json');
+const checkCookies = args.includes('--cookies');
 
 // ── OS-agnostic base path resolution ────────────────────────────────────────
 
@@ -64,7 +86,7 @@ function browserBasePaths() {
   }
 }
 
-// ── Chromium-based browser scanner ──────────────────────────────────────────
+// ── Chromium-based browser scanner (Layer 1) ────────────────────────────────
 
 function readJsonFile(filePath) {
   try {
@@ -77,17 +99,12 @@ function readJsonFile(filePath) {
 function extractEmailFromPreferences(prefPath) {
   const data = readJsonFile(prefPath);
   if (!data) return null;
-
-  // account_info array (most reliable for signed-in Chrome profiles)
   if (Array.isArray(data.account_info) && data.account_info.length > 0) {
     return data.account_info[0].email || null;
   }
-
-  // signin.allowed_username fallback
   if (data.signin && data.signin.allowed_username) {
     return data.signin.allowed_username;
   }
-
   return null;
 }
 
@@ -95,17 +112,13 @@ function scanChromiumBrowser(browserName, userDataDir) {
   const results = [];
   if (!fs.existsSync(userDataDir)) return results;
 
-  // Read Local State for profile list
   const localState = readJsonFile(path.join(userDataDir, 'Local State'));
   const infoCache = localState?.profile?.info_cache || {};
 
-  // Also scan directories directly in case Local State is stale
   let profileDirs = new Set(Object.keys(infoCache));
   try {
     fs.readdirSync(userDataDir).forEach(name => {
-      if (name === 'Default' || /^Profile \d+$/.test(name)) {
-        profileDirs.add(name);
-      }
+      if (name === 'Default' || /^Profile \d+$/.test(name)) profileDirs.add(name);
     });
   } catch {}
 
@@ -115,8 +128,6 @@ function scanChromiumBrowser(browserName, userDataDir) {
 
     const cachedInfo = infoCache[profileName] || {};
     const prefPath = path.join(profilePath, 'Preferences');
-
-    // Email: prefer Preferences file (more current), fall back to Local State cache
     const email = extractEmailFromPreferences(prefPath) || cachedInfo.user_name || null;
     const displayName = cachedInfo.name || null;
 
@@ -124,7 +135,8 @@ function scanChromiumBrowser(browserName, userDataDir) {
       browser: browserName,
       profile: profileName,
       displayName,
-      email,
+      email,          // Layer 1: profile sign-in account (may be null even with active sessions)
+      googleSessions: null,  // Layer 2: filled by checkGoogleSessionCookies if --cookies
       profilePath,
     });
   }
@@ -132,13 +144,12 @@ function scanChromiumBrowser(browserName, userDataDir) {
   return results;
 }
 
-// ── Firefox scanner ──────────────────────────────────────────────────────────
+// ── Firefox scanner (Layer 1) ────────────────────────────────────────────────
 
 function scanFirefox(firefoxBase) {
   const results = [];
   if (!fs.existsSync(firefoxBase)) return results;
 
-  // Parse profiles.ini
   let profilesIni;
   try {
     profilesIni = fs.readFileSync(path.join(firefoxBase, 'profiles.ini'), 'utf8');
@@ -146,7 +157,6 @@ function scanFirefox(firefoxBase) {
     return results;
   }
 
-  // Extract profile paths (IsRelative + Path)
   const sections = profilesIni.split(/\[Profile\d+\]/);
   for (const section of sections) {
     const pathMatch = section.match(/^Path=(.+)$/m);
@@ -159,7 +169,6 @@ function scanFirefox(firefoxBase) {
       ? path.join(firefoxBase, rawPath.replace(/\//g, path.sep))
       : rawPath;
 
-    // Check signedInUser.json for Firefox Account email
     let email = null;
     try {
       const signedIn = JSON.parse(fs.readFileSync(path.join(profilePath, 'signedInUser.json'), 'utf8'));
@@ -171,6 +180,7 @@ function scanFirefox(firefoxBase) {
       profile: nameMatch ? nameMatch[1].trim() : path.basename(profilePath),
       displayName: null,
       email,
+      googleSessions: null,
       profilePath,
     });
   }
@@ -178,16 +188,142 @@ function scanFirefox(firefoxBase) {
   return results;
 }
 
-// ── Search for specific email in profile Preferences ────────────────────────
+// ── Layer 2: Google session cookie detection ─────────────────────────────────
+//
+// Strategy: copy the Cookies SQLite file to a temp path (avoids lock issues),
+// then query it using available SQLite tooling.
+//
+// Priority order for SQLite access:
+//   1. better-sqlite3 Node module (if installed, cross-platform, no subprocess)
+//   2. sqlite3 Node module (if installed)
+//   3. sqlite3 CLI binary on PATH (shell out)
+//   4. Skip (return null = unknown)
+//
+// NOTE: Cookie values are DPAPI-encrypted on Windows (Chromium 80+). We can
+// detect the PRESENCE of Google session cookies (row exists in the table) but
+// CANNOT read the email addresses from the values without decryption.
+// Use this to confirm "yes, Google sessions exist" → then navigate to
+// accounts.google.com in that browser to see which accounts.
 
-function profileContainsEmail(profilePath, email) {
-  const prefPath = path.join(profilePath, 'Preferences');
-  if (!fs.existsSync(prefPath)) return false;
+function findSQLiteBinary() {
+  const candidates = ['sqlite3', 'sqlite3.exe'];
+  for (const bin of candidates) {
+    try {
+      execSync(`"${bin}" --version`, { stdio: 'pipe', timeout: 2000 });
+      return bin;
+    } catch {}
+  }
+  return null;
+}
+
+let _sqliteBinary = undefined;
+let _betterSqlite3 = undefined;
+let _sqlite3Module = undefined;
+
+function getSQLiteMethod() {
+  if (_betterSqlite3 === undefined) {
+    try { _betterSqlite3 = require('better-sqlite3'); } catch { _betterSqlite3 = null; }
+  }
+  if (_betterSqlite3) return 'better-sqlite3';
+
+  if (_sqlite3Module === undefined) {
+    try { _sqlite3Module = require('sqlite3'); } catch { _sqlite3Module = null; }
+  }
+  if (_sqlite3Module) return 'sqlite3';
+
+  if (_sqliteBinary === undefined) _sqliteBinary = findSQLiteBinary();
+  if (_sqliteBinary) return 'binary';
+
+  return null;
+}
+
+const GOOGLE_SESSION_COOKIE_NAMES = ['APISID', 'SAPISID', 'SID', 'HSID', 'SSID', 'OSID', '__Secure-1PSID', '__Secure-3PSID'];
+const GOOGLE_COOKIE_QUERY = `
+  SELECT COUNT(*) as cnt FROM cookies
+  WHERE host_key LIKE '%.google.com'
+  AND name IN ('${GOOGLE_SESSION_COOKIE_NAMES.join("','")}')
+`.trim();
+
+function copyToTemp(src) {
+  const tmpDir = os.tmpdir();
+  const tmpFile = path.join(tmpDir, `scan-cookies-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`);
   try {
-    const content = fs.readFileSync(prefPath, 'utf8');
-    return content.includes(email);
+    fs.copyFileSync(src, tmpFile);
+    // Also copy WAL/SHM files if they exist
+    for (const ext of ['-wal', '-shm']) {
+      const walSrc = src + ext;
+      if (fs.existsSync(walSrc)) fs.copyFileSync(walSrc, tmpFile + ext);
+    }
+    return tmpFile;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+function queryGoogleCookiesBinary(dbPath, bin) {
+  try {
+    const result = execSync(
+      `"${bin}" "${dbPath}" "${GOOGLE_COOKIE_QUERY}"`,
+      { stdio: 'pipe', timeout: 5000, encoding: 'utf8' }
+    ).trim();
+    return parseInt(result, 10) > 0;
+  } catch {
+    return null;
+  }
+}
+
+function findCookieFile(profilePath) {
+  // Chromium 96+ moved the Cookies database to a Network subdirectory.
+  // Check new location first, fall back to legacy location.
+  const newPath = path.join(profilePath, 'Network', 'Cookies');
+  if (fs.existsSync(newPath)) return newPath;
+  const oldPath = path.join(profilePath, 'Cookies');
+  if (fs.existsSync(oldPath)) return oldPath;
+  return null;
+}
+
+function checkGoogleSessionCookies(profilePath, browser) {
+  // Firefox doesn't use Chrome-style Cookies SQLite for Google
+  if (browser === 'Firefox') return null;
+
+  const cookieFile = findCookieFile(profilePath);
+  if (!cookieFile) return null;
+
+  const method = getSQLiteMethod();
+  if (!method) return null;  // no SQLite tooling available
+
+  const tmpDb = copyToTemp(cookieFile);
+  if (!tmpDb) return null;
+
+  try {
+    if (method === 'better-sqlite3') {
+      const db = _betterSqlite3(tmpDb, { readonly: true, fileMustExist: true });
+      try {
+        const row = db.prepare(GOOGLE_COOKIE_QUERY).get();
+        return row && row.cnt > 0;
+      } finally {
+        db.close();
+      }
+    }
+
+    if (method === 'sqlite3') {
+      // sqlite3 module is callback-based — not easily usable synchronously here
+      // Fall through to binary method
+      return null;
+    }
+
+    if (method === 'binary') {
+      return queryGoogleCookiesBinary(tmpDb, _sqliteBinary);
+    }
+
+    return null;
+  } catch {
+    return null;
+  } finally {
+    // Clean up temp copy and WAL/SHM files
+    for (const ext of ['', '-wal', '-shm']) {
+      try { fs.unlinkSync(tmpDb + ext); } catch {}
+    }
   }
 }
 
@@ -197,64 +333,99 @@ function main() {
   const paths = browserBasePaths();
   let allResults = [];
 
-  // Chromium-based browsers
   const chromiumBrowsers = { ...paths };
   delete chromiumBrowsers.firefox;
   for (const [name, dir] of Object.entries(chromiumBrowsers)) {
     allResults.push(...scanChromiumBrowser(name, dir));
   }
+  if (paths.firefox) allResults.push(...scanFirefox(paths.firefox));
 
-  // Firefox
-  if (paths.firefox) {
-    allResults.push(...scanFirefox(paths.firefox));
+  // Layer 2: check session cookies if requested
+  if (checkCookies) {
+    const sqliteMethod = getSQLiteMethod();
+    if (!sqliteMethod && !jsonOutput) {
+      console.error('⚠️  No SQLite tooling found (better-sqlite3, sqlite3, or sqlite3 binary). --cookies requires one of these.');
+    }
+    for (const r of allResults) {
+      r.googleSessions = checkGoogleSessionCookies(r.profilePath, r.browser);
+    }
   }
 
-  // If --find: also search raw Preferences content for email (catches accounts
-  // with sessions but not signed into Chrome profile manager)
+  // Filter for --find
+  let filtered = allResults;
   if (findEmail) {
-    allResults = allResults.filter(r => {
+    filtered = allResults.filter(r => {
       if (r.email && r.email.toLowerCase() === findEmail.toLowerCase()) return true;
-      if (!r.email && profileContainsEmail(r.profilePath, findEmail)) {
-        r.email = `${findEmail} (found in Preferences, not primary profile account)`;
-        return true;
-      }
+      // Check raw Preferences content as fallback (catches some extra cases)
+      const prefPath = path.join(r.profilePath, 'Preferences');
+      try {
+        if (fs.existsSync(prefPath) && fs.readFileSync(prefPath, 'utf8').includes(findEmail)) {
+          r.email = `${findEmail} (found in Preferences text, not confirmed primary account)`;
+          return true;
+        }
+      } catch {}
       return false;
     });
   }
 
   if (jsonOutput) {
-    console.log(JSON.stringify(allResults, null, 2));
+    console.log(JSON.stringify(
+      filtered.map(r => ({ ...r, profilePath: undefined })),
+      null, 2
+    ));
     return;
   }
 
-  if (allResults.length === 0) {
+  if (filtered.length === 0) {
     if (findEmail) {
-      console.log(`Not found: ${findEmail} is not pre-populated in any browser profile on this machine.`);
+      console.log(`Layer 1 result: "${findEmail}" not found in any browser profile metadata on this machine.`);
+      if (!checkCookies) console.log('Try --cookies to check session cookies (detects accounts active without profile sign-in).');
     } else {
       console.log('No browser profiles found.');
     }
     return;
   }
 
-  if (findEmail) {
-    console.log(`Searching for: ${findEmail}\n`);
-  }
+  if (findEmail) console.log(`Searching for: ${findEmail}\n`);
 
-  // Group by browser
   const byBrowser = {};
-  for (const r of allResults) {
+  for (const r of filtered) {
     if (!byBrowser[r.browser]) byBrowser[r.browser] = [];
     byBrowser[r.browser].push(r);
   }
+
+  const cookieMethodName = getSQLiteMethod() || 'none';
 
   for (const [browser, profiles] of Object.entries(byBrowser)) {
     console.log(`\n${browser}`);
     console.log('─'.repeat(browser.length));
     for (const p of profiles) {
       const name = p.displayName ? ` (${p.displayName})` : '';
-      const email = p.email || '(no Google account)';
-      console.log(`  ${p.profile}${name}: ${email}`);
+      const layer1 = p.email || '(no profile sign-in — Layer 1 blind here)';
+      let line = `  ${p.profile}${name}: ${layer1}`;
+
+      if (checkCookies) {
+        if (p.googleSessions === true) {
+          line += '  ✅ Google session cookies present → navigate to accounts.google.com to see which accounts';
+        } else if (p.googleSessions === false) {
+          line += '  ⬜ No Google session cookies';
+        } else if (p.googleSessions === null && p.browser === 'Firefox') {
+          line += '  — (Firefox: separate cookie format, skipped)';
+        } else {
+          line += '  ❓ Cookie check inconclusive (no Cookies file, or locked, or no SQLite tooling)';
+        }
+      }
+
+      console.log(line);
     }
+  }
+
+  if (checkCookies) {
+    console.log(`\n[Layer 2 cookie check used: ${cookieMethodName}]`);
+    console.log('[Cookie values are encrypted — only presence detected, not email addresses]');
+    console.log('[Ground truth: navigate to accounts.google.com in any browser with ✅ to see which accounts]');
+  } else if (!findEmail) {
+    console.log('\n[Run with --cookies to also check for active Google sessions (not just profile sign-in)]');
   }
 }
 
