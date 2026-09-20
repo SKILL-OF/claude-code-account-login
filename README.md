@@ -1,8 +1,8 @@
 # claude-code-account-login
 
-Canonical agent procedure for switching the `claude` CLI account on a desktop machine with Firefox.
+Canonical agent procedure for switching the `claude` CLI account. Platform-agnostic state machine. Reference implementation details (Linux/Firefox) are in the appendix — do not confuse the supernal method with an instantiated contingency.
 
-Validated on: aurora@aurora (Kali Linux, AMD Athlon 2850e, Firefox ESR, tmux). Took one full workday to derive. Do not improvise.
+Validated originally on: aurora@aurora (Kali Linux, Firefox ESR, tmux). Do not improvise.
 
 ---
 
@@ -19,57 +19,194 @@ The CLI prints: `If the browser didn't open, visit: [MANUAL URL]`
 
 **The printed URL is the MANUAL URL. Do not use it.** Using it and then trying to deliver the code to the local server creates a redirect_uri mismatch → HTTP 400.
 
-Use the LOCAL URL. The browser follows the redirect to localhost automatically. No manual code delivery needed.
+Use the LOCAL URL. The browser follows the redirect to localhost automatically.
 
 ---
 
-## Prerequisites
+## Critical: TUI lock requires meta-harness guardian
 
-```bash
-claude auth status                          # check current account
-ps aux | grep firefox | grep -v grep        # confirm Firefox running
-tmux list-panes -t TARGET -F "#{pane_current_command}"  # must show zsh, not claude
+`claude auth login` **locks the entire TUI thread** while waiting for the OAuth callback. The dancing agent cannot use harness tools (ListAgents, SendMessage) during the dance. A guardian agent must assist through the **meta-harness** (wmux surface_list, terminal_read, terminal_send or equivalent). This is not optional — you cannot do the login dance alone.
+
+---
+
+## State Machine — Flow A: Non-Gmail (magic link accounts)
+
+```mermaid
+stateDiagram-v2
+    [*] --> QuotaWarning
+
+    QuotaWarning --> SelectAccount : quota approaching / warning triggered
+    SelectAccount --> ShellOpen : non-Gmail account chosen
+
+    ShellOpen --> LoginInitiated : run: claude auth login --email ACCOUNT
+    note right of LoginInitiated
+        TUI LOCKED for duration of dance.
+        Guardian must use meta-harness only.
+    end note
+
+    LoginInitiated --> URLsGenerated : CLI outputs LOCAL + MANUAL URLs
+    URLsGenerated --> LocalURLCaptured : guardian captures PORT\nreconstructs LOCAL URL from log
+
+    LocalURLCaptured --> BrowserNavigation : guardian opens LOCAL URL in browser
+
+    BrowserNavigation --> SameBrowserRedirect : same browser follows redirect automatically
+    BrowserNavigation --> DiffBrowser6Digit : different browser intercepted the link
+
+    DiffBrowser6Digit --> SixDigitDelivered : guardian reads 6-digit code\ndelivers to locked TUI via meta-harness
+    SameBrowserRedirect --> OAuthPage
+    SixDigitDelivered --> OAuthPage
+
+    OAuthPage --> CorrectAccount : page footer shows correct email
+    OAuthPage --> WrongAccount : page footer shows wrong email
+
+    WrongAccount --> ArmEmailMonitor : click "Switch account"
+    ArmEmailMonitor --> MagicLinkEmailSent : arm monitor BEFORE submitting email\nthen submit email address
+    note right of ArmEmailMonitor
+        Magic link expires in ~5 minutes.
+        Arm monitor first, move fast.
+    end note
+
+    MagicLinkEmailSent --> MagicLinkSameBrowser : same browser opens magic link
+    MagicLinkEmailSent --> MagicLinkDiffBrowser : different browser opened magic link
+
+    MagicLinkSameBrowser --> OAuthPage : auth completes inline, page reloads
+    MagicLinkDiffBrowser --> MagicLink6Digit : shows 6-digit code (not a redirect)
+    MagicLink6Digit --> OAuthPage : guardian delivers code to locked TUI
+
+    CorrectAccount --> Authorized : click Authorize
+
+    Authorized --> CallbackCheck
+    CallbackCheck --> CallbackReceived : browser redirects to localhost:PORT/callback
+    CallbackCheck --> CallbackBlocked : browser stayed at platform.claude.com\nshowing auth code in URL bar
+
+    CallbackBlocked --> ManualCurlDelivery : extract code+state from URL bar\ncurl http://[::1]:PORT/callback?code=CODE&state=STATE
+    note right of ManualCurlDelivery
+        CLI server listens on [::1] (IPv6 localhost).
+        Use http://[::1]:PORT/ not http://127.0.0.1:PORT/
+    end note
+    ManualCurlDelivery --> CallbackReceived
+
+    CallbackReceived --> TUIUnlocked : auth exchange completes
+    TUIUnlocked --> AuthVerified : run: claude auth status\nconfirm loggedIn:true, correct email
+
+    AuthVerified --> RemoteControlRecovery : all agents needing harness visibility\nrequire /remote-control refresh
+    RemoteControlRecovery --> [*] : see SKILL-OF/claude-code-remote-control
+```
+
+**Note on the two kinds of codes:**
+- **6-digit code** (States DiffBrowser6Digit / MagicLink6Digit): appears when a *different* browser opens an auth link mid-dance. Must be delivered to the dancing agent's locked TUI.
+- **Final OAuth auth code** (State CallbackBlocked): appears in the URL bar of the browser after Authorize, when the `https → http` redirect is blocked. Delivered via curl to the local callback server directly.
+These are distinct. Do not confuse them.
+
+---
+
+## State Machine — Flow B: Gmail (Google OAuth)
+
+```mermaid
+stateDiagram-v2
+    [*] --> QuotaWarning
+
+    QuotaWarning --> SelectAccount : quota approaching / warning triggered
+    SelectAccount --> ShellOpen : Gmail account chosen
+
+    ShellOpen --> LoginInitiated : run: claude auth login --email GMAIL_ACCOUNT
+    note right of LoginInitiated
+        TUI LOCKED for duration of dance.
+        Guardian must use meta-harness only.
+    end note
+
+    LoginInitiated --> GoogleOAuthURL : CLI generates Google OAuth URL\n(not LOCAL/MANUAL split — different flow)
+
+    GoogleOAuthURL --> BrowserNavigation : guardian opens Google OAuth URL in browser
+
+    BrowserNavigation --> GoogleAccountPicker : Google shows account selection UI
+    BrowserNavigation --> GoogleAlreadySignedIn : browser already signed in as correct account
+
+    GoogleAccountPicker --> CorrectGoogleAccount : select correct Gmail account
+    GoogleAlreadySignedIn --> GoogleAuthorizeScreen
+
+    CorrectGoogleAccount --> GoogleAuthorizeScreen : Google shows permissions/authorize screen
+
+    GoogleAuthorizeScreen --> GoogleAllowed : click Allow / Continue
+
+    GoogleAllowed --> CallbackCheck
+    CallbackCheck --> CallbackReceived : browser redirects to localhost/callback
+    CallbackCheck --> CallbackBlocked : browser blocked redirect
+
+    CallbackBlocked --> ManualCurlDelivery : curl fallback (same as Flow A)
+    ManualCurlDelivery --> CallbackReceived
+
+    CallbackReceived --> TUIUnlocked
+    TUIUnlocked --> AuthVerified : claude auth status → loggedIn:true
+
+    AuthVerified --> RemoteControlRecovery
+    RemoteControlRecovery --> [*]
+
+    note right of GoogleAccountPicker
+        ⚠️ Gmail flow "different browser" behavior
+        not yet validated. 6-digit code behavior
+        may differ from Flow A. Document after
+        first successful Gmail execution.
+    end note
 ```
 
 ---
 
-## The dance
+## Quota Sensing (when to initiate the dance)
 
-### 1 — Open a plain shell window
+Track before every dance:
+1. **Current 5hr quota usage** (absolute)
+2. **Current 7d quota usage** (absolute)
+3. **1st derivative** — rate of usage increase
+4. **2nd derivative** — is the rate accelerating?
+5. **Dance cost** — time (minutes) and tokens consumed per dance, as rolling average
 
+Decision rule: start the dance when `(quota_remaining / burn_rate) ≤ dance_time_with_margin`.
+
+Initiate on quota warning. Do not wait for quota exhaustion — the dance takes 5–8 minutes and magic links expire in 5 minutes.
+
+---
+
+## Account Rotation
+
+| Account | Email | Type | Flow |
+|---------|-------|------|------|
+| A | `dariensirius@protonmail.com` | Non-Gmail, claude.ai signup | Flow A |
+| B | `claude.anthropic@aurora.wordgarden.dev` | Non-Gmail, claude.ai signup | Flow A |
+| C | `ottopoet.thesean@gmail.com` | Gmail | Flow B |
+
+Rotation: A → B → C → A. With ~3hr cycles, A's 5hr quota resets by the time you return to it.
+
+---
+
+## Appendix: Linux Reference Implementation (aurora@aurora, Kali, Firefox ESR, tmux)
+
+The following are Linux-specific commands that instantiate the abstract steps above. They are NOT the skill — they are one machine's contingency.
+
+### Open plain shell window
 ```bash
 tmux new-window -t aurora -n "login-dance"
-# Verify: must show zsh
-tmux list-panes -t aurora:login-dance -F "#{pane_current_command}"
+tmux list-panes -t aurora:login-dance -F "#{pane_current_command}"  # must show zsh
 ```
 
-### 2 — Start login and capture port
-
-Send to the shell window (not via Claude Code Bash tool, which runs in a different session):
-
+### Start login and capture port
+Send to shell window (not via Claude Code Bash tool):
 ```bash
 ~/.local/bin/claude auth login --email YOUR@EMAIL 2>&1 | tee /tmp/auth-login.log
 ```
-
-From your agent's Bash tool:
-
+From agent Bash tool (after delay):
 ```bash
 sleep 4
 PORT=$(ss -tlnp | grep claude | grep -oP ':\K\d+' | head -1)
-echo "PORT: $PORT"
 ```
 
-### 3 — Reconstruct the LOCAL URL
-
+### Reconstruct LOCAL URL
 ```bash
 MANUAL_URL=$(grep 'redirect_uri=https' /tmp/auth-login.log | grep -oP 'https://claude\.com[^\s]+')
 LOCAL_URL="${MANUAL_URL/redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback/redirect_uri=http%3A%2F%2Flocalhost%3A${PORT}%2Fcallback}"
-# Verify:
-echo "$LOCAL_URL" | grep 'redirect_uri=http%3A%2F%2Flocalhost'
 ```
 
-### 4 — Navigate Firefox to the LOCAL URL
-
+### Navigate Firefox to LOCAL URL (Linux/xdotool)
 ```bash
 WID=$(xdotool search --class "firefox" 2>/dev/null | tail -1)
 echo -n "$LOCAL_URL" | xclip -selection clipboard
@@ -77,116 +214,22 @@ xdotool windowactivate --sync $WID && sleep 0.5
 xdotool key --window $WID ctrl+l && sleep 0.5
 xdotool key --window $WID ctrl+v && sleep 0.3
 xdotool key --window $WID Return
-sleep 6
-aurora-screenshot /tmp/oauth-check.png
 ```
 
-### 5 — Confirm account and Authorize
-
-The page footer must say **"Logged in as YOUR@EMAIL"**.
-
-If wrong account: click "Switch account", complete magic link flow (arm `mail-watch.py` Monitor BEFORE submitting email), then revisit the LOCAL URL.
-
-Click Authorize. Firefox redirects to `http://localhost:PORT/callback` automatically.
-
-### 6 — Verify
-
+### Magic link extraction (Linux IMAP)
 ```bash
-sleep 5 && claude auth status
-# Expect: "email": "YOUR@EMAIL", "loggedIn": true
-```
-
----
-
-## Why the MANUAL flow produces HTTP 400
-
-When you use the MANUAL URL (`redirect_uri=platform.claude.com`) and then deliver the code to the local server:
-
-- Code was issued with: `redirect_uri=https://platform.claude.com/oauth/code/callback`
-- Token exchange sends: `redirect_uri=http://localhost:PORT/callback`
-- OAuth server rejects: **redirect_uri mismatch → 400**
-
-The reverse also fails: you cannot send a code obtained from the local callback through the manual token exchange path. Each URL must be used end-to-end.
-
----
-
-## If Firefox blocks the localhost redirect
-
-Firefox may block `https → http` mixed-content redirects. Symptoms: browser stays at `platform.claude.com/oauth/code/callback` showing an "Authentication code" page.
-
-Fix: capture the code from the URL bar at that page, then call the local server directly:
-
-```bash
-# URL bar shows: https://platform.claude.com/oauth/code/callback?code=XXXX&state=YYYY
-CODE="XXXX"
-STATE="YYYY"
-curl "http://[::1]:${PORT}/callback?code=${CODE}&state=${STATE}"
-# Expect: 302 Found (then auth completes)
-```
-
-This works because the LOCAL URL was used in the OAuth request — the redirect_uri is consistent.
-
-Note: the CLI's local server listens on `[::1]` (IPv6 localhost). Use `http://[::1]:PORT/` not `http://127.0.0.1:PORT/` if direct curl is needed.
-
----
-
-## Magic link flow (if account switch required)
-
-```bash
-# 1. Arm monitor BEFORE submitting email
-# (via Claude Code Monitor tool on mail-watch.py)
-
-# 2. Submit email on login page in Firefox
-
-# 3. When Monitor fires with email JSON:
 python3 ~/_/AS/email-agent/mail-watch.py --timeout-minutes 5 2>/dev/null
-
-# 4. Extract magic link from email
-python3 - << 'EOF'
-import imaplib, ssl, subprocess, email, re
-from pathlib import Path
-HOST, PORT_IMAP, USER = 'mail.wordgarden.dev', 993, 'aurora@wordgarden.dev'
-SCRIPT = Path('/home/aurora/_/AS/email-agent/_nss_decrypt.py')
-pw = subprocess.check_output(['python3', str(SCRIPT)], text=True).strip()
-ctx = ssl.create_default_context()
-with imaplib.IMAP4_SSL(HOST, PORT_IMAP, ssl_context=ctx) as M:
-    M.login(USER, pw)
-    M.select('INBOX')
-    # Use UID from monitor event
-    typ, data = M.fetch('UID_HERE', '(RFC822)')
-    msg = email.message_from_bytes(data[0][1])
-    for part in msg.walk():
-        body = part.get_payload(decode=True)
-        if body:
-            links = re.findall(r'https://[^\s"<>]*magic-link[^\s"<>]*', body.decode('utf-8', errors='replace'))
-            if links: print(links[0]); break
-EOF
-
-# 5. Paste magic link into Firefox (clipboard, then ctrl+l ctrl+v Enter)
-# 6. After login: revisit LOCAL URL, verify account, click Authorize
 ```
+Then extract link from IMAP (see original README for full script).
 
-Magic links are single-use and expire in ~5 minutes. Move fast.
+### Machine-specific gotchas (aurora@aurora)
+| Issue | Fix |
+|-------|-----|
+| Screenshots | `aurora-screenshot /tmp/out.png` (not import/gnome-screenshot — AVX2 SIGILL) |
+| Firefox focus | `xdotool windowactivate` not `windowfocus` |
+| tmux send-keys | `C-m` not `Enter` |
+| IPv6 socket | `http://[::1]:PORT/` not `http://127.0.0.1:PORT/` |
+| Multiple Firefox WIDs | `xdotool search --class "firefox" \| tail -1` |
 
----
-
-## Machine-specific notes (aurora@aurora)
-
-| Concern | Fix |
-|---------|-----|
-| Screenshots | `aurora-screenshot /tmp/out.png` — NOT `import`/`gnome-screenshot` (AVX2 → SIGILL) |
-| Firefox focus | `xdotool windowactivate` (raises window) not `windowfocus` (doesn't raise) |
-| tmux send-keys | Use `C-m` not `Enter` |
-| IPv6 socket | CLI server listens on `[::1]` — curl needs `http://[::1]:PORT/` or `http://localhost:PORT/` |
-| Multiple Firefox WIDs | `xdotool search --class "firefox" \| tail -1` for the main window |
-
----
-
-## Time budget
-
-Allow 5–8 minutes total on a slow machine:
-- 2 min: page loads, Firefox automation
-- 2 min: magic link flow (if account switch needed)
-- 1 min: token exchange and verification
-
-The magic link expires in 5 minutes. Do not pause between "arm Monitor" → "submit email" → "paste link".
+### Time budget
+Allow 5–8 minutes total. Magic link expires in 5 minutes — do not pause between arm-monitor → submit-email → paste-link.
