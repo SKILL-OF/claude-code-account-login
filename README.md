@@ -179,6 +179,62 @@ Rotation: A → B → C → A. With ~3hr cycles, A's 5hr quota resets by the tim
 
 ---
 
+## Appendix: Windows / wmux Implementation
+
+Platform-specific details for agents running in the wmux harness on Windows 11.
+
+### Guardian tools (wmux, not tmux/xdotool)
+
+The guardian does NOT use `tmux send-keys` or `xdotool`. Instead:
+
+```
+# Monitor dancing agent's terminal output
+mcp__wmux__terminal_read(paneId: <dancing-pane-id>, lines: 50)
+
+# Deliver a code or text to the locked TUI
+mcp__wmux__terminal_send(paneId: <dancing-pane-id>, text: "<code or command>")
+
+# Open browser (creates new pane — cannot target an existing one)
+mcp__wmux__browser_open(url: "<LOCAL_URL>")
+# After opening: verify pane id, label it
+mcp__wmux__pane_set_metadata(paneId: <new-pane>, data: {label: "browser/login-dance"})
+
+# Read the browser's current URL or page
+mcp__wmux__browser_snapshot(...)  # or browser_extract_text for page content
+```
+
+### browser_open pane placement (confirmed limitation, 2026-09-23)
+
+`browser_open` always creates a new auto-generated pane. Calling `pane_focus` via the wmux API before `browser_open` does NOT control which pane the browser splits into — that requires a human UI click. Accept the new pane, label it post-creation.
+
+When moving a browser pane: use `pane_close(browser_pane_id)`, not `surface_close`. `surface_close` leaves an orphan pane shell behind.
+
+### Capture the LOCAL URL (Windows, no log file)
+
+Since the dance agent's TUI is locked, the guardian reads the terminal output:
+```
+# Poll until URL appears in output
+mcp__wmux__terminal_read(paneId: <dancing-pane-id>, lines: 30)
+# Look for: "Visit https://..." — that is the MANUAL URL
+# Reconstruct LOCAL: extract PORT from log, build http://localhost:PORT/... URL
+```
+
+`ss -tlnp | grep claude` equivalent on Windows: `netstat -ano | findstr LISTENING` (filter by PID of claude process), or read the port directly from the log.
+
+### IPv6 curl fallback (Windows PowerShell)
+
+```powershell
+# Callback server listens on [::1] (IPv6), not 127.0.0.1
+Invoke-WebRequest -Uri "http://[::1]:${PORT}/callback?code=${CODE}&state=${STATE}" -UseBasicParsing
+# Or: curl.exe "http://[::1]:${PORT}/callback?code=${CODE}&state=${STATE}"
+```
+
+### Guardian timing note
+
+The wmux TUI lock means `terminal_read` will show static output — the last lines before the lock. Poll repeatedly. The log lines containing URLs appear within ~2 seconds of running `claude auth login`.
+
+---
+
 ## Appendix: Linux Reference Implementation (aurora@aurora, Kali, Firefox ESR, tmux)
 
 The following are Linux-specific commands that instantiate the abstract steps above. They are NOT the skill — they are one machine's contingency.
