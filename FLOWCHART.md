@@ -38,21 +38,25 @@ flowchart TD
     ThirdPartySubmenu -- go back --> MethodMenu
 
     TUILocked_1 --> CLIBrowserAttempt{OS browser tab\nactually opened?}
-    CLIBrowserAttempt -- Yes → tab visible\non desktop --> AuthPageDesktop[User sees claude.com auth page\nin their real browser\nOUTSIDE wmux visibility]
-    CLIBrowserAttempt -- No → tab blocked\nor no browser --> ManualURL[TUI shows MANUAL URL:\nclaude.com/cai/oauth/authorize?...\n'Browser didn't open? Use URL below'\n'Paste code here if prompted >']
+    CLIBrowserAttempt -- Yes → OS tab opened\nin default browser --> TabPresent[OS tab open in default browser\nCLI used LOCAL URL variant\nredirect_uri=http://localhost:PORT\nUIA can read+interact with this tab]
+    CLIBrowserAttempt -- No → tab blocked\nor no browser --> ManualURL[TUI shows MANUAL URL\n'Browser didn't open? Use URL below'\n'Paste code here if prompted >'\nguardian must open manually]
 
-    CLIBrowserAttempt -- Yes → OS tab opened --> TabOrphan[⚠️ TabOrphan:\nOS-launched tab in user's default browser\nwmux browser_* tools CANNOT see it\nGuardian is blind to this tab]
-    TabOrphan --> SideEffectSubpath{Who completes\nauth in that tab?}
-    SideEffectSubpath -- Victor (human) handles it --> HumanAuth[Victor authenticates\nin DuckDuckGo tab\nplatform.claude.com shows code]
-    SideEffectSubpath -- Agent-driven CDP/UIAutomation --> AgentAutoPath[⚠️ Requires non-wmux OS tooling\nnot available on current toolchain]
+    TabPresent --> UIASample[Guardian: UIA reads default browser window\nSystem.Windows.Automation PowerShell\nno CDP/debug port needed\nreads address bar + page content + buttons]
+    UIASample --> AuthSavedInProfile{AuthSavedInProfile?\nprofile-specific — depends on\nwhich browser + which profile\nis the OS default}
+    AuthSavedInProfile -- Yes → Authorize screen\nshown immediately --> UIAAuthorize[⭐ LOW COST path:\nUIA InvokePattern clicks Authorize\nno human step needed]
+    AuthSavedInProfile -- No → Login page shown --> HumanLogin[⛔ HIGH COST path:\nhuman must log in manually\nmaximum weight — avoid if possible]
+    HumanLogin --> UIAAuthorize
 
-    HumanAuth --> PasteCodeFlow
-    ManualURL --> GuardianOpens[Guardian calls browser_open(MANUAL URL)\nwmux managed browser — fully visible]
-    GuardianOpens --> PasteCodeFlow
+    UIAAuthorize --> LocalCallbackCheck{localhost:PORT/callback\nreceived by TUI local server?}
+    LocalCallbackCheck -- Yes → auto redirect --> TUIUnlocked_A[TUI completes PKCE exchange\nAuth complete — no code paste needed]
+    LocalCallbackCheck -- No → redirect blocked --> PasteCodeFallback[Browser stayed at platform.claude.com\nor shows code in URL bar\n'Paste code here if prompted >']
+    PasteCodeFallback --> DeliverCode[Guardian reads code from browser via UIA\nDelivers via terminal_send to TUI]
+    DeliverCode --> TUIUnlocked_A
 
-    PasteCodeFlow[After auth: platform.claude.com\nreceives OAuth code\nPage shows code to user/guardian] --> DeliverCode[Guardian reads code from browser\nDelivers to TUI 'Paste code here' field\nvia terminal_send]
-    DeliverCode --> TUIUnlocked_A[TUI completes PKCE exchange\nAuth complete]
-    TUIUnlocked_A --> TabCleanup[⚠️ TabCleanup quest:\nClose orphaned OS tab in default browser\nFailure modes: wrong browser, wrong tab,\nmultiple tabs, already navigated away,\nclosed whole browser instead of tab]
+    ManualURL --> GuardianOpens[Guardian calls browser_open(MANUAL URL)\nwmux managed browser — fully visible\nbut MANUAL URL → platform.claude.com callback\nnot LOCAL server]
+    GuardianOpens --> PasteCodeFallback
+
+    TUIUnlocked_A --> TabCleanup[TabCleanup quest:\nClose OS-launched tab in default browser\nUIA can close via window/tab automation\nFailure modes: wrong tab index, already\nnavigated, closing whole window]
 ```
 
 **Evidence to date (2026-09-23):**
@@ -65,7 +69,11 @@ flowchart TD
 - `Escape at every depth` **[CONFIRMED]**: "Login interrupted", normal chat resumes cleanly from inside deepest submenus.
 - `AuthAlreadySaved=false` **[RE-CONFIRMED]**: cookie-bearing claude.ai browser navigated directly to MANUAL OAuth URL → got fresh Log-in page, not an authorize screen. Cookies do not skip OAuth for this flow. (Meridian 2026-09-23)
 - `CLIBrowserAttempt` **[CONFIRMED]**: `/login` Option 1 outputs `✽ Opening browser to sign in…` — the CLI itself attempts an OS-level browser launch (`start <url>` / default-handler open). This happens OUTSIDE wmux — the guardian cannot see whether it succeeds or which tab opens. On Windows, if a browser is already running, new-tab requests route via IPC with no new PID spawned. (Meridian 2026-09-23)
-- `Entry A code-paste vs Entry B curl-callback` **[CONFIRMED]**: Entry A (/login) uses MANUAL URL only (redirect_uri=platform.claude.com/oauth/code/callback). No local callback server. After auth, platform.claude.com shows a code; the TUI prompts "Paste code here if prompted >". Entry B (claude auth login) generates LOCAL+MANUAL URLs; uses local server + curl for callback. These are distinct flows. (rabbit-0 + Meridian, 2026-09-23)
+- ~~`Entry A code-paste vs Entry B curl-callback [CONFIRMED]`~~ **[RETRACTED]**: rabbit-0 wrongly claimed Entry A shows only the MANUAL URL and uses code-paste as primary mechanism. CORRECTED by Meridian (seq 77): the OS-level browser launch uses a LOCAL URL (redirect_uri=http://localhost:PORT) — same structure as Entry B. The TUI-printed text is the MANUAL fallback. Primary path = LOCAL callback, same as Entry B. Code-paste is only needed when the LOCAL redirect fails. (Meridian 2026-09-23)
+- `Entry A LOCAL URL CONFIRMED` **[CONFIRMED]**: DuckDuckGo address bar showed `redirect_uri=http%3A%2F%2Flocalhost%3A57715%2Fcallback` — a live local port. OS launch used LOCAL, not MANUAL. (Meridian, UIA read 2026-09-23)
+- `AuthSavedInProfile is profile-specific` **[CONFIRMED]**: dariensirius logged in to claude.ai in DuckDuckGo → Authorize screen immediately. Same domain in wmux managed browser (clean profile) → Login page. Profile determines saved auth, not domain. (Meridian 2026-09-23)
+- `UIA can sample+interact with OS default browser` **[CONFIRMED]**: `System.Windows.Automation` PowerShell reads DuckDuckGo window address bar and page content. `InvokePattern` can click buttons (Authorize/Decline). No CDP/debug port needed. (Meridian 2026-09-23)
+- `Weighted graph principle` **[DESIGN]**: user-required steps get maximum edge weight; minimizer should skip them when an agent-only path exists. Current state (AuthSavedInProfile=TRUE, UIA InvokePattern to Authorize) = minimum-cost path, no human step. (Victor, 2026-09-23)
 
 ---
 
