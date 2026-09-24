@@ -168,7 +168,9 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 8. **CLI's own browser launch is a guardian blind spot** — Entry A (`/login`) attempts an OS-level browser open (`✽ Opening browser to sign in…`) completely outside wmux. If the user's browser is already open, a new tab silently appears via IPC (no new process, not visible to pane_list/browser_tabs). Guardian cannot detect whether it succeeded. Guardian's own `browser_open` call is the only browser action the guardian can see and control.
 
-9. **Entry A uses code-paste, not curl-callback** — In Entry A (/login), the redirect_uri is `platform.claude.com/oauth/code/callback` (not localhost). After the user authorizes, platform.claude.com displays a code; the TUI prompts "Paste code here if prompted >". Guardian delivers the code via `terminal_send` to that prompt. No local server, no port reconstruction, no curl needed for Entry A.
+9. **Do not collapse the default-browser variable** — The CLI uses Windows `ShellExecuteW(url)` which routes to whatever browser holds `HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice\ProgId`. On this machine that ProgId resolves to **DuckDuckGo Browser** (`DuckDuckGo.DesktopBrowser_0.172.4.0_x64`), not Chrome or Firefox. Pre-dance recon must read this registry key to know which browser to monitor. Checking for specific browser PIDs is an unchecked assumption — a grave sin in phase-space mapping.
+
+10. **Entry A uses code-paste, not curl-callback** — In Entry A (/login), the redirect_uri is `platform.claude.com/oauth/code/callback` (not localhost). After the user authorizes, platform.claude.com displays a code; the TUI prompts "Paste code here if prompted >". Guardian delivers the code via `terminal_send` to that prompt. No local server, no port reconstruction, no curl needed for Entry A.
 
 ---
 
