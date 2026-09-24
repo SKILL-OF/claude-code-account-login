@@ -27,16 +27,28 @@ The two entry paths may converge at common nodes (OAuthPage, CallbackCheck, etc.
 flowchart TD
     EntryA([/login slash command\nin Claude Code chat input]) --> AlreadyAuth{Session already\nauthenticated?}
     AlreadyAuth -- Yes --> LoginConfirmed[Login successful\nfast path — no TUI lock\nno browser\nno OAuth]
-    AlreadyAuth -- No --> AccountPicker{/login shows\naccount picker?}
-    AccountPicker -- Yes → picker shown --> SelectAccount[Select target account\nfrom list]
-    AccountPicker -- No → goes direct --> LoginInitiated_A
-    SelectAccount --> LoginInitiated_A[TUI LOCKED\nOAuth flow begins]
-    LoginInitiated_A --> SharedFlow([→ join Entry B at URLsGenerated])
+    AlreadyAuth -- No --> MethodMenu[3-way method\nselection menu shown\nEsc to cancel at any depth]
+
+    MethodMenu -- 1. Claude account\nPro/Max/Team/Enterprise --> TUILocked_1[TUI LOCKED\nMANUAL OAuth URL generated\nsame shape as Entry B]
+    MethodMenu -- 2. Console/API --> ConsoleSubmenu[3-item submenu:\nsign in / create legacy API key / go back]
+    MethodMenu -- 3. 3rd-party\nBedrock/Foundry/Vertex --> ThirdPartySubmenu[4-item submenu:\nBedrock interactive / Foundry docs-only /\nVertex AI interactive / go back]
+    MethodMenu -- Esc --> LoginInterrupted[Login interrupted\nnormal chat resumes]
+
+    ConsoleSubmenu -- go back --> MethodMenu
+    ThirdPartySubmenu -- go back --> MethodMenu
+
+    TUILocked_1 --> SharedFlow([→ join Entry B at URLsGenerated])
 ```
 
 **Evidence to date (2026-09-23):**
-- `AlreadyAuth → Yes → LoginConfirmed` **[CONFIRMED]**: sent `/login` to rabbit-1's Claude Code session, received "Login successful" immediately, no TUI lock, no browser.
-- `AccountPicker` branch **[THEORY — not yet observed]**: requires unauthenticated session to reach.
+- `AlreadyAuth → Yes → LoginConfirmed` **[CONFIRMED]**: sent `/login` to rabbit-1's already-authenticated session, received "Login successful" immediately, no TUI lock, no browser.
+- `AlreadyAuth → No → MethodMenu` **[CONFIRMED]**: Meridian (w14-1) navigated unauthenticated rabbit-1 (daemon-f71aee79) into /login via split-call terminal_send. Saw 3-way method selection menu: 1. Claude account, 2. Console/API, 3. 3rd-party.
+- `Option 1 → TUI LOCKED` **[CONFIRMED]**: TUI lock begins at option selection, not at the menu itself. MANUAL OAuth URL shape matches Entry B. (Meridian 2026-09-23)
+- `Option 2 → 3-item submenu` **[CONFIRMED]**: sign in / create legacy API key / go back. (Meridian 2026-09-23, stopped before triggering real Console OAuth)
+- `Option 3 → 4-item submenu` **[CONFIRMED]**: Bedrock (interactive) / Foundry (opens docs URL only, no interactive flow) / Vertex AI (interactive) / go back. (Meridian 2026-09-23)
+- `Go back at every depth` **[CONFIRMED]**: returns to correct parent menu, cursor reset.
+- `Escape at every depth` **[CONFIRMED]**: "Login interrupted", normal chat resumes cleanly from inside deepest submenus.
+- `AuthAlreadySaved=false` **[RE-CONFIRMED]**: cookie-bearing claude.ai browser navigated directly to MANUAL OAuth URL → got fresh Log-in page, not an authorize screen. Cookies do not skip OAuth for this flow. (Meridian 2026-09-23)
 
 ---
 
