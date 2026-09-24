@@ -299,14 +299,14 @@ The dance is cyclic. Each account's `fiveHourResetsAt` is the next opportunity t
 
 | Account | Flow | 5h % | 5h Reset | 7d % | 7d Reset | Status |
 |---|---|---|---|---|---|---|
-| dariensirius@protonmail.com | A (magic link) | ~100% | 20:20 / ts 1790220000 | ~12% | 2026-09-30 | ⏰ NEXT — dance back at reset |
-| ottopoet.thesean@gmail.com | B (Gmail OAuth) | 13% | 23:20 / ts 1790230800 | 27% | 2026-09-24 18h | ✅ ACTIVE |
+| dariensirius@protonmail.com | A (magic link) | ~0% (fresh) | ~01:23 / ts 1790238216 | ~12% | 2026-09-30 | ✅ ACTIVE — returned at 20:23:36 |
+| ottopoet.thesean@gmail.com | B (Gmail OAuth) | ~45% (last read 20:01) | 23:20 / ts 1790230800 | ~31% | 2026-09-24 18h | ⏰ NEXT — dance back at reset |
 | claude.anthropic@aurora.wordgarden.dev | A (magic link) | unknown | unknown | unknown | unknown | 🔵 STANDBY |
 
 **Trigger logic:**
 - `next_dance_target` = account with minimum `fiveHourResetsAt` among depleted (>90%) accounts
 - `dance_deadline` = `next_dance_target.fiveHourResetsAt - dance_duration_buffer` (10 min buffer)
-- Right now: next dance deadline = **20:10 local** (back to dariensirius, ~1h40m)
+- Right now: next dance deadline = **23:10 local** (back to ottopoet.thesean, ts 1790230200, ~2h45m from 20:25)
 
 **Rotation cycle (canonical order):**
 ```
