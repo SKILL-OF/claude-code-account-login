@@ -157,7 +157,12 @@ This is the path fully documented in README.md (Flow A / Flow B).
     OAuthPage -- Yes --> Authorize[Click Authorize]
     OAuthPage -- No, wrong account --> SwitchAccount[Click Switch account]
 
-    SwitchAccount --> ArmMonitor[Arm magic link monitor\nBEFORE submitting email\n5-min expiry — move fast]
+    SwitchAccount --> TabProvenanceCheck{Email provider tab:\ncheck BEFORE spawning new\nAny existing tab for provider?}
+    TabProvenanceCheck -- Pinned tab exists\nleast action → use it --> TabReady[Use existing tab\nnever spawn if one found]
+    TabProvenanceCheck -- Known tab from\nprevious browser_tabs scan --> TabReady
+    TabProvenanceCheck -- Prior-workflow tab\nused then abandoned → return --> TabReady
+    TabProvenanceCheck -- No existing tab\nonly then → spawn new --> ArmMonitor
+    TabReady --> ArmMonitor[Arm magic link monitor\nBEFORE submitting email\n5-min expiry — move fast]
     ArmMonitor --> SubmitEmail[Submit email address]
     SubmitEmail --> MagicLinkBranch{Magic link opened by\nwhich browser?}
     MagicLinkBranch -- Same browser\npage reloads --> OAuthPage
@@ -188,6 +193,10 @@ This is the path fully documented in README.md (Flow A / Flow B).
 | **CallbackBlocked** | Both flows — after Authorize clicked | Browser cannot redirect `https → http`. Auth code visible in URL bar. Use curl to deliver it to the local server directly. |
 | **GoogleAlreadySignedIn** | Flow B — Google OAuth URL opened | No account picker shown — goes straight to Authorize screen. Safe to proceed. |
 | **AllAccountsExhausted** | Triage — before selecting target | All 4 accounts near limit. No dance helps. Must wait for a reset. |
+| **TabProvenance** | Email provider step — any time the agent needs inbox access | Three sub-cases for an existing tab (in priority order): **(a) Pinned tab** — highest prior, always prefer over spawning; **(b) Known tab** — seen in prior browser_tabs scan; **(c) Prior-workflow tab** — used in an earlier phase of THIS workflow, then abandoned. This run: pinned tab WAS used initially (Victor witnessed it). Least action: check for existing tabs first, spawn only if none found. |
+| **InboxFreshness** | Inside email tab, before clicking any magic link | After arriving at the inbox tab, the displayed email list may be stale — showing older messages, missing new arrivals. Must explicitly refresh before scanning for the current magic link request. This run: inbox NOT refreshed; an older magic link email (from 2 logins ago) was visible and assumed to be current. |
+| **MagicLinkAge** | Inside email tab, after finding a candidate email | The email displayed may be from a PRIOR login request, not the current one. Must verify the email's timestamp before clicking. This run: stale email (2 logins old) was clicked without age check → expiry error. |
+| **ExpiredLinkRecovery** | After clicking a magic link that returns "expired" error | Two paths: **(a) Correct** — return to the inbox tab, refresh, locate newer email, click; **(b) Wrong (2 lanes off least action)** — abandon the inbox tab and spawn a new navigation. This run: path (b) — pinned ProtonMail tab abandoned, new tab spawned instead of refreshing inbox. |
 
 ---
 
@@ -226,6 +235,46 @@ This is the path fully documented in README.md (Flow A / Flow B).
   **Path 2 — External intervention:** Another agent (on a fresh quota account) or human detects dancer silence via `terminal_read`, identifies the stalled dance node, and either: (a) aborts the original dance (Escape/close TUI) and restarts with a fresh agent, or (b) resumes from the stall point if state is recoverable. External entity then runs RC sweep on all affected panes and notifies agents of new account.
 
   **The meta-level trap:** The coordinator (rabbit-0) can also hit quota mid-sweep. A partially-swept RC state is worse than no sweep — some agents reconnected, others showing `/rc failed`. Mitigation: coordinator must be on a DIFFERENT quota account than the dancer, or have confirmed headroom before starting the sweep.
+
+15. **TabProvenance — prefer existing tabs over spawning** — Before navigating to any email provider for a magic link, check whether a tab for that provider already exists in the default browser. Priority: (1) pinned tab — never spawn if a pinned tab exists; (2) known tab from prior `browser_tabs` scan; (3) a tab used in a previous phase of this same workflow and abandoned (likely still in correct auth state). Spawning a new tab when an existing one is available is two lanes from least action. Real incident (2026-09-23): DuckDuckGo had a logged-in ProtonMail pinned tab (Victor's "first pinned tab") that was known and had been used earlier in the same session — agent eventually abandoned it and spawned new.
+
+16. **InboxFreshness + MagicLinkAge — verify before clicking** — When the agent arrives at an inbox tab to find a magic link, the displayed email list may be stale and the visible email may be from a prior login attempt. Protocol: (a) explicitly refresh the inbox before scanning; (b) verify the candidate email's timestamp matches the current login request; (c) if expired → return to inbox tab, refresh, find newer message — never spawn a new tab as the response to an expiry error. Real incident (2026-09-23): agent clicked a magic link email from 2 logins ago without checking its age, received "magic link expired" error, then abandoned the pinned ProtonMail tab and spawned new instead of refreshing inbox.
+
+---
+
+## Email Inbox Navigation Sub-Flow (TabProvenance + MagicLinkAge detail)
+
+```mermaid
+flowchart TD
+    SubmitEmail2[Email submitted →\nwaiting for magic link delivery] --> InboxNav{Which tab for\nemail provider?}
+    InboxNav -- Pinned tab exists\n → use it → least action --> InboxTab[Navigate to / focus existing tab]
+    InboxNav -- Known tab exists\n from prior scan --> InboxTab
+    InboxNav -- Tab used in prior workflow phase\n → return to it --> InboxTab
+    InboxNav -- No existing tab → only then --> SpawnEmailTab[Spawn new tab\nnavigate to email provider]
+    SpawnEmailTab --> InboxTab
+
+    InboxTab --> RefreshInbox[Explicitly refresh inbox\nbefore scanning for new messages\nDO NOT assume display is current]
+    RefreshInbox --> EmailScan[Scan inbox for\ncurrent magic link email]
+    EmailScan --> MagicLinkAgeCheck{Email timestamp\nmatches current\nlogin request?}
+    MagicLinkAgeCheck -- Yes → fresh email\ncurrent request --> ClickMagicLink[Click magic link]
+    MagicLinkAgeCheck -- No → stale or\nnot yet arrived --> WaitOrRescan[Wait and rescan\nDO NOT click stale email]
+    WaitOrRescan --> EmailScan
+
+    ClickMagicLink --> LinkResult{Magic link\nresult?}
+    LinkResult -- Valid → auth redirect → new tab opens --> OAuthPageReturn([→ OAuthPage\nauth proceeds])
+    LinkResult -- Expired error page --> ExpiredDecision{Recovery path}
+
+    ExpiredDecision -- CORRECT: return to\ninbox tab, refresh, find newer email --> RefreshInbox
+    ExpiredDecision -- WRONG (two lanes off\nleast action): abandon tab,\nspawn new navigation --> WrongPath[TabProvenance reset to Fresh\nunnecessary spawn\nlosses: pinned tab context,\npre-loaded auth state,\ntime]
+    WrongPath --> SpawnEmailTab
+```
+
+**This run's path (2026-09-23, seq 138 correction by Victor):**
+- Agent navigated the pinned ProtonMail tab ✓
+- Did NOT refresh the inbox before scanning ✗
+- Clicked the first magic link email found — which was from 2 logins ago (expired) ✗
+- Received expiry error
+- Instead of returning to inbox tab + refreshing → spawned new tab ✗ (two lanes off least action)
 
 ---
 
