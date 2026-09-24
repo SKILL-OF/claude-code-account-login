@@ -56,7 +56,9 @@ flowchart TD
     ManualURL --> GuardianOpens[Guardian calls browser_open(MANUAL URL)\nwmux managed browser — fully visible\nbut MANUAL URL → platform.claude.com callback\nnot LOCAL server]
     GuardianOpens --> PasteCodeFallback
 
-    TUIUnlocked_A --> TabCleanup[TabCleanup quest:\nClose OS-launched tab in default browser\nUIA can close via window/tab automation\nFailure modes: wrong tab index, already\nnavigated, closing whole window]
+    TUIUnlocked_A --> RCBlastRadius[⚡ MACHINE-WIDE blast-radius:\n~/.claude/.credentials.json updated globally\nEVERY running Claude Code agent on this machine\nsimultaneously receives RC disconnect banner:\n'Remote Control disconnected — signed-in account\nor organization changed on this machine']
+    RCBlastRadius --> RCSweep[Coordinator role (rabbit-0/dispatcher):\npane_list ALL live agent surfaces\nterminal_send /remote-control to each one\nverify each surface reconnects before next step]
+    RCSweep --> TabCleanup[TabCleanup quest:\nClose OS-launched tab in default browser\nUIA can close via window/tab automation\nFailure modes: wrong tab index, already\nnavigated, closing whole window]
 ```
 
 **Note on the AlreadyAuth CONFIRMED line above**: that was observed on a session already logged in as the account it already had. The trace below is the real, deliberately UNauthenticated case, mapped end to end, and then completed all the way through a real dance (see Completed Real Dance Trace section at the end of this doc).
@@ -210,7 +212,9 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 11. **Pre-dance identity verification required** — Before starting any dance, run `claude auth status` (or equivalent) on the dancing agent to confirm its CURRENT account. The dance must end on a DIFFERENT account than it started on — one whose 5h/7d limits haven't been hit. A dance that starts and ends on the same account (`start-node = end-node` in account space) provides mechanical validation of the browser/UIA automation path but delivers ZERO quota relief. The 2026-09-23 real dance was a self-loop: rabbit-1 started as `dariensirius@protonmail.com` (workspace default) and ended as `dariensirius@protonmail.com` — the same account. Pre-condition check: `current_account != target_account`.
 
-12. **Entry A tab-spam vs Entry B guardian control** — Entry A (`/login`) auto-launches a browser tab in the OS default browser (DuckDuckGo, Edge, whatever). That tab is outside wmux visibility and creates a tab cleanup burden with many failure modes. Entry B (`claude auth login --email` in a shell) does NOT auto-launch a browser — the guardian calls `browser_open(LOCAL_URL)` explicitly, has full lifecycle control, and closes the tab cleanly with `pane_close`. For agent-driven dances, Entry B is architecturally superior. Entry A's side-effect tab is only completable by the human (or non-wmux OS automation not on this toolchain).
+12. **Post-dance RC blast-radius — coordinator sweep required** — A successful cross-account auth updates `~/.claude/.credentials.json` globally. Every Claude Code process on this machine reads from the same file. Immediately after `TUIUnlocked_A`, ALL running agents simultaneously receive: `● Remote Control disconnected — signed-in claude.ai account or organization changed on this machine — run /remote-control to start a session for the current account`. The coordinator (rabbit-0/dispatcher) must: (1) `pane_list` all live agent surfaces, (2) `terminal_send("/remote-control")` to each one, (3) verify reconnection before declaring the dance complete. This is not a post-dance cleanup — it is a mandatory synchronization step. A dance without the RC sweep leaves every other agent deaf.
+
+13. **Entry A tab-spam vs Entry B guardian control** — Entry A (`/login`) auto-launches a browser tab in the OS default browser (DuckDuckGo, Edge, whatever). That tab is outside wmux visibility and creates a tab cleanup burden with many failure modes. Entry B (`claude auth login --email` in a shell) does NOT auto-launch a browser — the guardian calls `browser_open(LOCAL_URL)` explicitly, has full lifecycle control, and closes the tab cleanly with `pane_close`. For agent-driven dances, Entry B is architecturally superior. Entry A's side-effect tab is only completable by the human (or non-wmux OS automation not on this toolchain).
 
 ---
 
