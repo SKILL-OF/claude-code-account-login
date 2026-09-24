@@ -6,6 +6,38 @@ They must stay in sync — a new divergence documented here needs a correspondin
 
 ---
 
+## Reading this doc on a different platform or harness — graph vs. tooling
+
+**The phase-space graph below (entry points, nodes, decision branches, failure modes) is
+real and platform-independent.** Every specific mechanism cited alongside it
+(`System.Windows.Automation`, `SetForegroundWindow`, `SendKeys`, Win32 coordinate clicks)
+is **this session's own implementation on Windows 11 + PowerShell + a Chromium/CEF-based
+default browser (DuckDuckGo Browser on this machine).** It is not a requirement of the
+graph itself — it's one working answer to a question every node in the "browser
+interaction" section is really asking. Do not read "UIA" as load-bearing; read the
+underlying capability it's standing in for.
+
+The recurring underlying capabilities, generalized:
+
+| Generic capability | What Windows/UIA did here | What you'd likely use instead |
+|---|---|---|
+| Read the browser's current URL/page content | `System.Windows.Automation` (PowerShell), no CDP needed | Playwright/CDP `page.url()` + DOM read; macOS Accessibility API (`AXUIElement`); Linux AT-SPI; a browser extension content script; or a managed/sandboxed browser your harness already exposes (e.g. a built-in browser tool) |
+| Click a specific button reliably | Win32 `SetCursorPos`+`mouse_event` at the element's `BoundingRectangle`, focus-verified before AND after (see Key Facts 23-24 — a naive `InvokePattern`/focus-once approach silently fails on Chromium/CEF) | Playwright/CDP's own `.click()` (generally reliable against Chromium without this fight, since it drives the page directly rather than fighting OS window focus); a browser tool's native click primitive |
+| Detect whether your OS-level input actually landed | Re-read state after the action, compare before/after, never trust the action call's own return value | Same discipline applies universally — whatever mechanism you use, verify post-action state independently; this lesson (Key Facts 21, 23-24) is NOT Windows-specific |
+| Enumerate all open tabs | **Not solved here** — DuckDuckGo/CEF exposes zero `TabItem` controls via UIA; the workaround was Ctrl+Tab/Ctrl+9 cycling with examine-before-acting, not true enumeration | A CDP/Playwright-driven browser can likely `browser.contexts()[].pages()` directly — if your platform can do real tab enumeration, that's strictly better than this session's workaround; please extend this doc with it |
+| Deliver a keystroke/paste to a locked TUI | wmux `terminal_send`/`terminal_send_key`, PTY-targeted by `ptyId` | Whatever your meta-harness's equivalent PTY-write primitive is |
+
+**If you're extending this graph from a different platform**: keep the node names and
+decision structure (they're the real, hard-won part — see the Completed Real Dance
+Trace and the Key Facts for what was actually validated, not assumed), and add your own
+tooling-mapping row/column rather than replacing the Windows-specific detail — future
+readers on Windows still need it, and future readers on your platform need theirs
+alongside it, not instead of it. A real, open gap worth flagging if you close it: full
+tab enumeration (see table above) and a genuinely reliable click mechanism that doesn't
+require OS-level foreground-focus fighting.
+
+---
+
 ## Entry Points: Two Distinct Graphs
 
 These are NOT the same entry point. They live in different contexts and are interpreted by different systems.
