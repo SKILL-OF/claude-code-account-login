@@ -29,7 +29,7 @@ flowchart TD
     AlreadyAuth -- Yes --> LoginConfirmed[Login successful\nfast path — no TUI lock\nno browser\nno OAuth]
     AlreadyAuth -- No --> MethodMenu[3-way method\nselection menu shown\nEsc to cancel at any depth]
 
-    MethodMenu -- 1. Claude account\nPro/Max/Team/Enterprise --> TUILocked_1[TUI LOCKED\nMANUAL OAuth URL generated\nsame shape as Entry B]
+    MethodMenu -- 1. Claude account\nPro/Max/Team/Enterprise --> TUILocked_1[TUI LOCKED\n✽ Opening browser to sign in…\nCLI attempts OS-level browser launch\nMANUAL OAuth URL generated]
     MethodMenu -- 2. Console/API --> ConsoleSubmenu[3-item submenu:\nsign in / create legacy API key / go back]
     MethodMenu -- 3. 3rd-party\nBedrock/Foundry/Vertex --> ThirdPartySubmenu[4-item submenu:\nBedrock interactive / Foundry docs-only /\nVertex AI interactive / go back]
     MethodMenu -- Esc --> LoginInterrupted[Login interrupted\nnormal chat resumes]
@@ -37,7 +37,16 @@ flowchart TD
     ConsoleSubmenu -- go back --> MethodMenu
     ThirdPartySubmenu -- go back --> MethodMenu
 
-    TUILocked_1 --> SharedFlow([→ join Entry B at URLsGenerated])
+    TUILocked_1 --> CLIBrowserAttempt{OS browser tab\nactually opened?}
+    CLIBrowserAttempt -- Yes → tab visible\non desktop --> AuthPageDesktop[User sees claude.com auth page\nin their real browser\nOUTSIDE wmux visibility]
+    CLIBrowserAttempt -- No → tab blocked\nor no browser --> ManualURL[TUI shows MANUAL URL:\nclaude.com/cai/oauth/authorize?...\n'Browser didn't open? Use URL below'\n'Paste code here if prompted >']
+
+    AuthPageDesktop --> PasteCodeFlow
+    ManualURL --> GuardianOpens[Guardian calls browser_open(MANUAL URL)\nto reach claude.com auth page]
+    GuardianOpens --> PasteCodeFlow
+
+    PasteCodeFlow[After auth: platform.claude.com\nreceives OAuth code\nPage shows code to user/guardian] --> DeliverCode[Guardian reads code from browser\nDelivers to TUI 'Paste code here' field\nvia terminal_send]
+    DeliverCode --> TUIUnlocked_A[TUI completes PKCE exchange\nAuth complete]
 ```
 
 **Evidence to date (2026-09-23):**
@@ -49,6 +58,8 @@ flowchart TD
 - `Go back at every depth` **[CONFIRMED]**: returns to correct parent menu, cursor reset.
 - `Escape at every depth` **[CONFIRMED]**: "Login interrupted", normal chat resumes cleanly from inside deepest submenus.
 - `AuthAlreadySaved=false` **[RE-CONFIRMED]**: cookie-bearing claude.ai browser navigated directly to MANUAL OAuth URL → got fresh Log-in page, not an authorize screen. Cookies do not skip OAuth for this flow. (Meridian 2026-09-23)
+- `CLIBrowserAttempt` **[CONFIRMED]**: `/login` Option 1 outputs `✽ Opening browser to sign in…` — the CLI itself attempts an OS-level browser launch (`start <url>` / default-handler open). This happens OUTSIDE wmux — the guardian cannot see whether it succeeds or which tab opens. On Windows, if a browser is already running, new-tab requests route via IPC with no new PID spawned. (Meridian 2026-09-23)
+- `Entry A code-paste vs Entry B curl-callback` **[CONFIRMED]**: Entry A (/login) uses MANUAL URL only (redirect_uri=platform.claude.com/oauth/code/callback). No local callback server. After auth, platform.claude.com shows a code; the TUI prompts "Paste code here if prompted >". Entry B (claude auth login) generates LOCAL+MANUAL URLs; uses local server + curl for callback. These are distinct flows. (rabbit-0 + Meridian, 2026-09-23)
 
 ---
 
@@ -154,6 +165,10 @@ This is the path fully documented in README.md (Flow A / Flow B).
 6. **Two distinct 6-digit code scenarios** — `DiffBrowser6Digit` (different browser intercepts OAuth URL mid-dance) vs `MagicLink6Digit` (magic link opened by different browser) are different states. Both require guardian to deliver code to locked TUI.
 
 7. **Final OAuth code ≠ 6-digit code** — `CallbackBlocked` state shows the final auth code + state in the URL bar. This is not a 6-digit code; it's a full `code=...&state=...` URL parameter string for curl delivery.
+
+8. **CLI's own browser launch is a guardian blind spot** — Entry A (`/login`) attempts an OS-level browser open (`✽ Opening browser to sign in…`) completely outside wmux. If the user's browser is already open, a new tab silently appears via IPC (no new process, not visible to pane_list/browser_tabs). Guardian cannot detect whether it succeeded. Guardian's own `browser_open` call is the only browser action the guardian can see and control.
+
+9. **Entry A uses code-paste, not curl-callback** — In Entry A (/login), the redirect_uri is `platform.claude.com/oauth/code/callback` (not localhost). After the user authorizes, platform.claude.com displays a code; the TUI prompts "Paste code here if prompted >". Guardian delivers the code via `terminal_send` to that prompt. No local server, no port reconstruction, no curl needed for Entry A.
 
 ---
 
