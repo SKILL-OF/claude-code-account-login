@@ -19,13 +19,15 @@ underlying capability it's standing in for.
 
 The recurring underlying capabilities, generalized:
 
-| Generic capability | What Windows/UIA did here | What you'd likely use instead |
+| Generic capability | What Windows/UIA/wmux did here | What you'd likely use instead |
 |---|---|---|
 | Read the browser's current URL/page content | `System.Windows.Automation` (PowerShell), no CDP needed | Playwright/CDP `page.url()` + DOM read; macOS Accessibility API (`AXUIElement`); Linux AT-SPI; a browser extension content script; or a managed/sandboxed browser your harness already exposes (e.g. a built-in browser tool) |
 | Click a specific button reliably | Win32 `SetCursorPos`+`mouse_event` at the element's `BoundingRectangle`, focus-verified before AND after (see Key Facts 23-24 — a naive `InvokePattern`/focus-once approach silently fails on Chromium/CEF) | Playwright/CDP's own `.click()` (generally reliable against Chromium without this fight, since it drives the page directly rather than fighting OS window focus); a browser tool's native click primitive |
 | Detect whether your OS-level input actually landed | Re-read state after the action, compare before/after, never trust the action call's own return value | Same discipline applies universally — whatever mechanism you use, verify post-action state independently; this lesson (Key Facts 21, 23-24) is NOT Windows-specific |
 | Enumerate all open tabs | **Not solved here** — DuckDuckGo/CEF exposes zero `TabItem` controls via UIA; the workaround was Ctrl+Tab/Ctrl+9 cycling with examine-before-acting, not true enumeration | A CDP/Playwright-driven browser can likely `browser.contexts()[].pages()` directly — if your platform can do real tab enumeration, that's strictly better than this session's workaround; please extend this doc with it |
-| Deliver a keystroke/paste to a locked TUI | wmux `terminal_send`/`terminal_send_key`, PTY-targeted by `ptyId` | Whatever your meta-harness's equivalent PTY-write primitive is |
+| Read the dancer's terminal output | wmux `terminal_read` (PTY-targeted by `ptyId`) | tmux `pipe-pane`; SSH pty-read; `screen -X hardcopy`; your harness's own terminal-read primitive |
+| Deliver keystrokes/text to a locked TUI | wmux `terminal_send`/`terminal_send_key`, PTY-targeted by `ptyId` | tmux `send-keys`; SSH write-to-pty; whatever your meta-harness's equivalent PTY-write primitive is |
+| Enumerate live agent surfaces | wmux `pane_list` + `surface_list` | `ps aux \| grep claude`; procfs; launchctl on Mac; your harness's process registry |
 
 **If you're extending this graph from a different platform**: keep the node names and
 decision structure (they're the real, hard-won part — see the Completed Real Dance
@@ -35,6 +37,8 @@ readers on Windows still need it, and future readers on your platform need their
 alongside it, not instead of it. A real, open gap worth flagging if you close it: full
 tab enumeration (see table above) and a genuinely reliable click mechanism that doesn't
 require OS-level foreground-focus fighting.
+
+**Invitation for cross-platform contributors:** Add observations as new sections in this file or as `TRACES.<platform>.md`. Confirmed paths always beat theory — mark your evidence with `[CONFIRMED: platform/harness/date]`. Open a PR on `SKILL-OF/claude-code-account-login`, branch `skill/claude-code-account-login`.
 
 ---
 
@@ -242,11 +246,13 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 ## Key Facts (Prevent Known Failures)
 
+> **Tag legend:** `[U]` = Universal (any harness/OS) · `[W]` = Windows-specific (Win32/UIA/PowerShell) · `[wmux]` = wmux harness-specific. An untagged fact is universal unless the body says otherwise.
+
 1. **LOCAL URL vs MANUAL URL** — The CLI prints the MANUAL URL. Never use it. Reconstruct the LOCAL URL from the log (replace `redirect_uri=https%3A%2F%2F...` with `http://localhost:PORT`). See README for exact substitution.
 
-2. **TUI lock is total** — The dancing agent's harness tools (ListAgents, SendMessage, terminal_read) do not work during the OAuth wait. Guardian must use wmux meta-harness.
+2. **TUI lock is total** `[U]` — The dancing agent's harness tools do not work during the OAuth wait. What the guardian must do instead depends on the harness: in wmux, use meta-harness `terminal_read`/`terminal_send`; in tmux, use `send-keys`/`pipe-pane`; in CI, use the pty you spawned directly.
 
-3. **browser_open always creates a new pane** — `pane_focus` via API does not influence where the browser window splits. After `browser_open`, verify the new pane and label it. (wmux constraint; confirmed 2026-09-23 across three agent attempts.)
+3. **browser_open always creates a new pane** `[wmux]` — `pane_focus` via API does not influence where the wmux managed browser window splits. After `browser_open`, verify the new pane and label it. Non-wmux agents must open the browser via their own mechanism (shell `start`, `open`, `xdg-open`, etc.) and track the resulting PID/window ID themselves. (Confirmed 2026-09-23.)
 
 4. **Callback server listens on IPv6** — `http://[::1]:PORT/` not `http://127.0.0.1:PORT/` for the curl fallback.
 
@@ -256,7 +262,7 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 7. **Final OAuth code ≠ 6-digit code** — `CallbackBlocked` state shows the final auth code + state in the URL bar. This is not a 6-digit code; it's a full `code=...&state=...` URL parameter string for curl delivery.
 
-8. **CLI's own browser launch is a guardian blind spot** — Entry A (`/login`) attempts an OS-level browser open (`✽ Opening browser to sign in…`) completely outside wmux. If the user's browser is already open, a new tab silently appears via IPC (no new process, not visible to pane_list/browser_tabs). Guardian cannot detect whether it succeeded. Guardian's own `browser_open` call is the only browser action the guardian can see and control.
+8. **CLI's own browser launch is a guardian blind spot** `[U]` — Entry A (`/login`) attempts an OS-level browser open (`✽ Opening browser to sign in…`) completely outside any harness. If the user's browser is already open, a new tab silently appears via IPC (no new process, not visible to `pane_list`/`browser_tabs` in wmux, or to `ps` on any OS). Guardian cannot detect whether it succeeded. `[wmux]` The guardian's own `browser_open` opens a *separate* managed browser pane — not the OS-default browser the CLI opened. Do NOT use `browser_open` for dance OAuth; use UIA/OS automation on the default browser instead.
 
 9. **Do not collapse the default-browser variable** — The CLI uses Windows `ShellExecuteW(url)` which routes to whatever browser holds `HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice\ProgId`. On this machine that ProgId resolves to **DuckDuckGo Browser** (`DuckDuckGo.DesktopBrowser_0.172.4.0_x64`), not Chrome or Firefox. Pre-dance recon must read this registry key to know which browser to monitor. Checking for specific browser PIDs is an unchecked assumption — a grave sin in phase-space mapping.
 
@@ -389,14 +395,16 @@ The dance is cyclic. Each account's `fiveHourResetsAt` is the next opportunity t
 
 | Account | Flow | 5h % | 5h Reset | 7d % | 7d Reset | Status |
 |---|---|---|---|---|---|---|
-| dariensirius@protonmail.com | A (magic link) | ~0% (fresh) | ~01:23 / ts 1790238216 | ~12% | 2026-09-30 | ✅ ACTIVE — returned at 20:23:36 |
-| ottopoet.thesean@gmail.com | B (Gmail OAuth) | ~45% (last read 20:01) | 23:20 / ts 1790230800 | ~31% | 2026-09-24 18h | ⏰ NEXT — dance back at reset |
-| claude.anthropic@aurora.wordgarden.dev | A (magic link) | unknown | unknown | unknown | unknown | 🔵 STANDBY |
+| dariensirius@protonmail.com | A (magic link) | ~44% (21:24 local) | ~01:20 / ts 1790238000 | ~19% | 2026-09-30 | ✅ ACTIVE — Dance 2 target FROM this account |
+| ottopoet.thesean@gmail.com | B (Gmail OAuth) | stale (last read 20:01) | 23:20 / ts 1790230800 | ~31% | 2026-09-24 18h | 🎯 Dance 2 TARGET — flow in progress (21:38+) |
+| claude.anthropic@aurora.wordgarden.dev | A (magic link) | unknown | unknown | unknown | unknown | 🔵 STANDBY — no quota readings yet |
+
+*Tab cleanup: complete as of 21:38 local (10 tabs closed, bedrock reached at pinballpdx.org/news, verified).*
 
 **Trigger logic:**
 - `next_dance_target` = account with minimum `fiveHourResetsAt` among depleted (>90%) accounts
 - `dance_deadline` = `next_dance_target.fiveHourResetsAt - dance_duration_buffer` (10 min buffer)
-- Right now: next dance deadline = **23:10 local** (back to ottopoet.thesean, ts 1790230200, ~2h45m from 20:25)
+- Dance 2 now in progress (21:38+ local): dariensirius → ottopoet.thesean via Entry A (/login on rabbit-1)
 
 **Rotation cycle (canonical order):**
 ```
@@ -463,3 +471,34 @@ flowchart TD
 5. **Weighted-graph framing (Victor, seq 78) matches this run exactly**: `AuthSavedInProfile=TRUE` was the zero-human-step, minimum-cost edge, and it's the one this real dance happened to be on. The `FALSE` branch (fresh login page) remains untested end-to-end in this session — it requires a real human credential/2FA step and should stay high-weight in any future minimization pass.
 
 **Open, unresolved (flagged, not solved this session):** the now-completed OAuth flow leaves a real browser window open on the physical desktop (DuckDuckGo, showing the "You're all set up" success page). Victor named this precisely: *"each login dance spams an open tab to the user's default browser... countless failure cases in the 'clean up the tab you launched' quest line"* — wrong-browser assumptions, wrong-tab-index assumptions, closing without focusing, closing the whole browser instead of one tab. This session deliberately did NOT attempt automated cleanup of that window — left open, flagged to Victor, not closed on inference. A real close-verification protocol (confirm PID, confirm it's the same window opened for this exact dance via title/URL re-check immediately before closing, close via the same UIA path rather than guessing a hotkey) is real future work, not yet built.
+
+**Tab cleanup solution found (Dance 2 tab cleanup, 2026-09-23):** 10 tabs closed successfully using `BringWindowToTop` + `SetForegroundWindow` (dropping the Alt-tap heuristic that caused beeping/focus loss). Hard abort if focus check fails before OR after keypress. Examine-before-close discipline: each tab read independently before closing, one false-positive caught and corrected. Reached bedrock (Victor's pre-existing, unrelated content) — stopped. Protocol: "only pop what you pushed."
+
+---
+
+## Paths Not Yet Confirmed End-to-End
+
+These nodes appear in the Phase Space Map and flowchart above but have NOT been successfully navigated to their end state. Future agents: contribute a real trace if you complete one.
+
+| Path | Status | What's needed |
+|---|---|---|
+| **Flow B / Gmail OAuth** — SwitchAccountFlow: click "Switch account" → Google account picker → select target → Allow | ❌ Abandoned 5+ times without completion | A real Dance 2 run through to credential write. Document the Google picker UI, intermediate redirect URLs, and any account-mismatch edge cases. |
+| **LoopbackTrap resolution** — browser signed in as current/old account, must sign out and sign in as target | ❌ Not tested end-to-end | Requires a real run where the browser has the wrong account. Document sign-out flow and re-auth path. |
+| **AuthSavedInProfile=FALSE** — browser shows fresh login page, no saved session | ❌ Not tested (Dance 1 hit the TRUE branch) | Requires browser profile with no claude.ai cookies. Document credential entry, 2FA if any, re-auth flow. |
+| **Magic link 6-digit code delivery** — `MagicLink6Digit` state where link opens in wrong browser | ❌ Not tested | Requires environment where magic link opens in a browser different from the one with the LOCAL server tab. |
+| **CallbackBlocked fallback** — code+state URL parameters delivered manually via curl | ❌ Not tested | Requires environment where localhost redirect is blocked (firewall, corporate proxy). |
+
+---
+
+## Extending This Phase Space
+
+**For agents on other platforms/harnesses:** The OAuth protocol is universal; only the tooling to navigate it differs. If you run this dance on a different setup, add your confirmed traces here (or as `TRACES.<platform>.md`). Mark every step `[CONFIRMED: platform/harness/date]` or `[THEORY]`. Unconfirmed paths cost future agents time; confirmed paths save it.
+
+**High-value extensions not yet written:**
+- **Linux / tmux / xdotool**: How does a guardian read dancer output via `tmux pipe-pane`? How does it click the Authorize button via `xdotool`? What replaces Win32 `BringWindowToTop`?
+- **macOS / iTerm2 / AppleScript**: `osascript` for browser control; `tmux` or `screen` for TUI read/write. Does `ShellExecuteW` have a macOS equivalent?
+- **CI / headless**: No GUI. How does the guardian intercept the LOCAL callback (already listening on `[::1]:PORT`) without a browser? Can `curl` be used directly from the start?
+- **VS Code extension / JetBrains**: Different terminal mux, different process hierarchy. How does the extension agent read another agent's terminal?
+- **Non-DuckDuckGo browsers**: Chrome, Firefox, Edge, Safari all have different UIA/accessibility trees. The `InvokePattern` failure is Chromium-specific — does it apply to Firefox? Does WebDriver work here?
+
+To contribute: open a PR on `SKILL-OF/claude-code-account-login`, branch `skill/claude-code-account-login`. One real confirmed trace is worth more than ten theoretical nodes.
