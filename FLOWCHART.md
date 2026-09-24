@@ -201,6 +201,8 @@ This is the path fully documented in README.md (Flow A / Flow B).
 | **DispatchMechanismFailure** | Coordinator sends terminal_send to Dancer; delivery confirmed (agentStatus→"complete"); no dance observed | Two sub-cases: **(a) Dancer received as chat turn and idled** — responded with text, returned to idle without running the shell command; **(b) Dancer executed but Coordinator killed it** — confirmed: PID 21428 was rabbit-1's legitimate dance attempt; coordinator mistakenly killed it thinking it was an orphan. New protocol: coordinator must NEVER kill a `claude` process it did not start. Verified presence of a process alone is not proof of ownership. |
 | **CoordinatorKillsActiveDancer** | Coordinator calls Stop-Process on a PID it found by inspection, not by tracking its own spawns | Terminal failure mode. rabbit-1 ran `claude auth login`, browser opened, LOCAL server started — then coordinator killed the process (PID 21428) while inspecting process list. rabbit-1's surface shows pendingQuestion: "process exited code 127 while waiting for code paste." The kill caused the exit. Protocol: track exact PIDs you own. Never kill a `claude` PID you did not spawn. |
 | **WmuxBrowserVsDuckDuckGo** | Guardian tries to use wmux browser surface for Dance OAuth flow | Hard mismatch. The CLI opens DuckDuckGo (OS default browser, registry ProgId) via ShellExecuteW. Guardian must monitor DuckDuckGo via UIA (System.Windows.Automation), not via wmux browser tools. wmux browser is a separate managed browser, invisible to the CLI's LOCAL callback server. Using wmux browser for the OAuth page leaves the LOCAL server unreachable and creates stale wmux browser tabs that must be cleaned up separately. |
+| **TabCleanupInventory** | After dance completes (or after aborted attempts), stale DuckDuckGo tabs need to be closed without destroying the active dance tab | UIA cannot enumerate all tabs in a browser simultaneously — must cycle (Ctrl+Tab) and read each tab's address bar individually. **Examine-before-closing**: never close a tab without reading its URL first. The last tab in the cycle (Ctrl+9 or end of rotation) may be the ACTIVE dance tab (rabbit-1's live claude auth login flow), not a stale one. Real incident (2026-09-23, Dance 2): Meridian found a live ottopoet.thesean flow on the last tab and correctly skipped it, closed the stale dariensirius Authorize screen instead. |
+| **TabCleanupTOCTOU** | OS focus changes between sequential UIA tool calls cause input to land on wrong browser tab | wmux reclaims OS foreground focus between tool calls — identical to the SetForegroundWindow TOCTOU documented elsewhere. Fix: combine focus-grab + action + read into ONE atomic PowerShell script with no LLM round-trip between steps. Confirmed live (2026-09-23): sequential tool calls allowed wmux to steal focus; atomic script fixed it. |
 
 ---
 
@@ -250,6 +252,10 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 19. **DuckDuckGo vs wmux browser — guardian must use DuckDuckGo, never wmux browser** — The CLI's OS-level browser launch (ShellExecuteW) targets DuckDuckGo (HKCU registry ProgId, this machine). The LOCAL callback server at localhost:PORT only accepts the redirect from the browser that the CLI opened — DuckDuckGo. The wmux browser is a completely separate managed browser surface: it cannot reach localhost:PORT (local server is not running for it), and using it creates stale wmux tabs that must be cleaned separately. Guardian tools for DuckDuckGo: `System.Windows.Automation` (UIA) in PowerShell — reads address bar, page content, button locations. DO NOT call `browser_open` for the dance OAuth URL.
 
+20. **Tab cleanup: enumerate via Ctrl+Tab cycling, examine-before-closing** — UIA cannot enumerate all DuckDuckGo tabs simultaneously. Protocol: cycle with Ctrl+Tab, read each tab's address bar via UIA at each stop, build the full inventory before closing anything. Critical: the "last" tab (Ctrl+9 or end of cycle) may be the ACTIVE dance tab for rabbit-1's current auth flow — closing it would destroy an in-progress dance. Examine before deciding. Real incident (2026-09-23 Dance 2): Meridian found rabbit-1's live ottopoet.thesean flow at Ctrl+9, correctly skipped it, and closed the stale dariensirius Authorize screen tab instead.
+
+21. **Tab cleanup TOCTOU — atomic scripts only** — wmux actively reclaims OS foreground focus between sequential tool calls. This is the same race documented in Key Fact on TOCTOU. Fix: focus-grab + URL read + decision + close must be ONE atomic PowerShell script with no LLM round-trips between steps. Confirmed live (2026-09-23 Dance 2 guardian work): sequential calls allowed wmux to steal focus mid-operation; atomic script resolved it.
+
 ---
 
 ## Email Inbox Navigation Sub-Flow (TabProvenance + MagicLinkAge detail)
@@ -285,6 +291,40 @@ flowchart TD
 - Clicked the first magic link email found — which was from 2 logins ago (expired) ✗
 - Received expiry error
 - Instead of returning to inbox tab + refreshing → spawned new tab ✗ (two lanes off least action)
+
+---
+
+## OS Browser Tab Cleanup Sub-Flow (post-dance stale tab removal)
+
+Applies after any dance attempt (successful or aborted) that caused the CLI to ShellExecuteW into DuckDuckGo. Discovered via Meridian's live guardian work during Dance 2 (2026-09-23).
+
+```mermaid
+flowchart TD
+    CleanupStart([Tab cleanup needed:\npost-dance or post-abort]) --> BuildInventory[Build tab inventory:\nCtrl+Tab cycle through all tabs\nUIA read address bar at each stop\nNEVER close before reading]
+
+    BuildInventory --> ForEachTab{For each tab found}
+    ForEachTab --> ReadURL[Atomic script: focus tab +\nread address bar + classify\nAll in ONE PowerShell script\nNo LLM round-trips between steps]
+
+    ReadURL --> Classify{Classify tab URL}
+    Classify -- Matches live dance\ncode_challenge/state\nor login_hint for\ncurrent in-flight auth --> ActiveDance[SKIP — do not close\nThis is rabbit-1's active flow]
+    Classify -- Stale OAuth:\nold code_challenge or\nkilled process's state --> StaleOAuth[Close safely:\nUIA window close on this tab\nVerify it's gone]
+    Classify -- Stale login page:\nno matching flow --> StaleLogin[Close safely]
+    Classify -- Unrelated tab\nnot part of dance --> Preserve[Preserve — not dance-related]
+
+    ActiveDance --> ForEachTab
+    StaleOAuth --> ForEachTab
+    StaleLogin --> ForEachTab
+    Preserve --> ForEachTab
+
+    ForEachTab -- All tabs processed --> CleanupDone([Tab cleanup complete\nOnly active dance tabs remain\nAll stale tabs closed])
+```
+
+**Real observations (2026-09-23, Dance 2, Meridian guardian):**
+- UIA cannot list all tabs at once → Ctrl+Tab cycling is the only enumeration path
+- wmux steals focus between sequential tool calls → atomic scripts required for each tab operation
+- Ctrl+9 (last tab) was rabbit-1's ACTIVE dance tab — identified by login_hint=ottopoet.thesean@gmail.com in URL — preserved
+- A stale dariensirius Authorize screen from a prior attempt was the one closed
+- Pattern: examine URL before any close action, no matter how "obvious" it seems
 
 ---
 
