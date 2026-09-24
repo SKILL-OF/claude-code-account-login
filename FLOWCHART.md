@@ -242,14 +242,32 @@ Dance cost: 5–8 minutes elapsed, ~0.5% 5hr token burn for the dance itself.
 
 ---
 
-## Account Rotation Order
+## Account Rotation Scheduler
 
+The dance is cyclic. Each account's `fiveHourResetsAt` is the next opportunity to switch BACK to it. The coordinator tracks all accounts and triggers the next dance when `current_account.5h > threshold` AND a depleted account's reset is imminent.
+
+**Live rotation table** (update at each quota sample):
+
+| Account | Flow | 5h % | 5h Reset | 7d % | 7d Reset | Status |
+|---|---|---|---|---|---|---|
+| dariensirius@protonmail.com | A (magic link) | ~100% | 20:20 / ts 1790220000 | ~12% | 2026-09-30 | ⏰ NEXT — dance back at reset |
+| ottopoet.thesean@gmail.com | B (Gmail OAuth) | 13% | 23:20 / ts 1790230800 | 27% | 2026-09-24 18h | ✅ ACTIVE |
+| claude.anthropic@aurora.wordgarden.dev | A (magic link) | unknown | unknown | unknown | unknown | 🔵 STANDBY |
+
+**Trigger logic:**
+- `next_dance_target` = account with minimum `fiveHourResetsAt` among depleted (>90%) accounts
+- `dance_deadline` = `next_dance_target.fiveHourResetsAt - dance_duration_buffer` (10 min buffer)
+- Right now: next dance deadline = **20:10 local** (back to dariensirius, ~1h40m)
+
+**Rotation cycle (canonical order):**
 ```
 dariensirius@protonmail.com (A) → claude.anthropic@aurora.wordgarden.dev (B) → ottopoet.thesean@gmail.com (C) → A
 ```
+Skip accounts with <5h headroom or unknown state. Always check current_account ≠ target before initiating.
 
-A and B: Flow A (non-Gmail). C: Flow B (Gmail).
-With ~3hr active cycles, A's 5hr quota resets by the time you rotate back.
+**Planned refactor** (seq 110): This FLOWCHART.md is the navigator's decision view. Companion files to build:
+- `SEQUENCE.md` — UML sequence diagram with per-actor swimlanes (Coordinator, Dancer, Browser/UIA, CLI/TUI, CredentialFile, AllOtherAgents, EmailProvider)
+- Per-actor state machines (mermaid stateDiagram-v2) for DancerSM, GuardianSM, QuotaSM, CredentialFileSM
 
 ---
 
