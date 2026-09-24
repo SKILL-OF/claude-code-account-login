@@ -219,6 +219,14 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 13. **Entry A tab-spam vs Entry B guardian control** — Entry A (`/login`) auto-launches a browser tab in the OS default browser (DuckDuckGo, Edge, whatever). That tab is outside wmux visibility and creates a tab cleanup burden with many failure modes. Entry B (`claude auth login --email` in a shell) does NOT auto-launch a browser — the guardian calls `browser_open(LOCAL_URL)` explicitly, has full lifecycle control, and closes the tab cleanly with `pane_close`. For agent-driven dances, Entry B is architecturally superior. Entry A's side-effect tab is only completable by the human (or non-wmux OS automation not on this toolchain).
 
+14. **QuotaExhausted — cross-cutting fault at every dance node** — At ANY node where a dancing or coordinating agent is consuming tokens, quota can hit 0. This is not a single edge — it is a system-wide fault that can interrupt any in-progress node. Two resolution paths:
+
+  **Path 1 — Wait for reset:** Dancing agent goes silent. TUI may stay locked. System waits for `fiveHourResetsAt` or `sevenDayResetsAt`. Auto-recovery only if a ScheduleWakeup loop fires in time AND the waking instance has enough compacted context to resume. Without those, the system is paralyzed until a human arrives.
+
+  **Path 2 — External intervention:** Another agent (on a fresh quota account) or human detects dancer silence via `terminal_read`, identifies the stalled dance node, and either: (a) aborts the original dance (Escape/close TUI) and restarts with a fresh agent, or (b) resumes from the stall point if state is recoverable. External entity then runs RC sweep on all affected panes and notifies agents of new account.
+
+  **The meta-level trap:** The coordinator (rabbit-0) can also hit quota mid-sweep. A partially-swept RC state is worse than no sweep — some agents reconnected, others showing `/rc failed`. Mitigation: coordinator must be on a DIFFERENT quota account than the dancer, or have confirmed headroom before starting the sweep.
+
 ---
 
 ## Quota Trigger Thresholds (when to initiate)
