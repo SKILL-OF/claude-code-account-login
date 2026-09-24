@@ -34,9 +34,36 @@ flowchart TD
     LoginInitiated_A --> SharedFlow([→ join Entry B at URLsGenerated])
 ```
 
+**Note on the AlreadyAuth CONFIRMED line above**: that was observed on a session already logged in as the account it already had. The trace below is the real, deliberately UNauthenticated case, mapped end to end, and then completed all the way through a real dance (see Completed Real Dance Trace section at the end of this doc).
+
 **Evidence to date (2026-09-23):**
-- `AlreadyAuth → Yes → LoginConfirmed` **[CONFIRMED]**: sent `/login` to rabbit-1's Claude Code session, received "Login successful" immediately, no TUI lock, no browser.
-- `AccountPicker` branch **[THEORY — not yet observed]**: requires unauthenticated session to reach.
+- `AccountPicker` branch **[CONFIRMED, real menu tree mapped — Meridian w14-1, on rabbit-1's live surface daemon-f71aee79, not a throwaway session]**: an unauthenticated `/login` does NOT go straight to LoginConfirmed or straight to OAuth. It shows a **method-selection menu** first, itself with sub-branches:
+
+```mermaid
+flowchart TD
+    M0([/login — unauthenticated]) --> Menu{Select login method}
+    Menu -- 1. Claude account\nw/ subscription --> M1[Opening browser to sign in…\nprints MANUAL URL\nTUI LOCKED from here]
+    Menu -- 2. Anthropic Console\naccount --> M2{How to sign in?}
+    Menu -- 3. 3rd-party platform --> M3{Which platform?}
+
+    M2 -- 1. Sign in with\nConsole account --> M2a[not yet traced —\nlikely converges to OAuth]
+    M2 -- 2. Create API key\nlegacy --> M2b[not yet traced —\nlikely prompts key entry]
+    M2 -- 3. Go back --> Menu
+
+    M3 -- 1. Amazon Bedrock --> M3a[interactive setup —\nnot yet traced]
+    M3 -- 2. Microsoft Foundry --> M3b[opens docs URL only:\ncode.claude.com/docs/en/microsoft-foundry\nno interactive flow]
+    M3 -- 3. Google Vertex AI --> M3c[interactive setup —\nnot yet traced]
+    M3 -- 4. Go back --> Menu
+
+    Menu -- Esc --> Cancelled([Login interrupted\nclean return to normal chat\nCONFIRMED at every menu depth])
+```
+
+  Confirmed by direct navigation (down/enter/escape on a real live session, not printed text): "Go back" cleanly returns to the parent menu at every depth tested (Console submenu → top menu; 3rd-party submenu → top menu). Escape at the top level cleanly cancels to normal chat ("Login interrupted"), same as the deeper OAuth-locked state. **Not yet traced**: M2a/M2b (Console sign-in and legacy API key entry) and M3a/M3c (Bedrock/Vertex interactive setup) — stopped short of these deliberately to avoid triggering real AWS/GCP/Console credential prompts with no plan to complete them.
+- Selecting option 1 and proceeding converges on the exact same OAuth URL shape as Entry B (`claude.com/cai/oauth/authorize?...&redirect_uri=...platform.claude.com%2Foauth%2Fcode%2Fcallback...`) — confirmed by literal string comparison, not inference. TUI locks only after this point, not at the method-selection menu itself.
+
+**AuthAlreadySaved is not answered by cookie presence — confirmed, not assumed.** A wmux browser already carrying live `claude.ai` cookies (cf_clearance, __cf_bm, session cookies, real prior login) was navigated directly to the printed OAuth URL and showed a full, fresh "Log in" page (Google / Apple / Continue with email) — not an already-authenticated Authorize screen. `claude.ai` session cookies do not satisfy the separate `claude.com/cai` OAuth authorize flow. The only reliable check for AuthAlreadySaved is real page content after navigation, never cookie inspection alone.
+
+**Vessel, not participant — a real operational lesson, not just etiquette.** First attempt at this exercise wrongly spun up a brand-new disposable `claude` process in a second surface inside rabbit-1's pane to test `/login`, rather than using rabbit-1's own already-running session. Victor, direct: *"making a new claude code instance for each login is a memory and session leak."* Confirmed real, not hypothetical — the throwaway process left a genuine resumable session file on disk (`claude --resume b9fd0585-...`) before it was cleaned up (Esc → `/exit` → `surface_close`). The correct pattern for testing/executing a real dance: check the target's real live status via `pane_list` (`agentStatus: "complete"` = idle, safe; `"waiting"` = mid-turn, not safe) — not a courtesy notification round-trip, since the target session in this role is being used as infrastructure, not consulted as a collaborator — then send the command directly into its existing surface. Reserve the courtesy/consent framing for when a peer's own turn or judgment is actually being asked for, not for using their terminal as the dance vessel.
 
 ---
 
@@ -182,3 +209,43 @@ Before starting the dance, confirm guardian can:
 
 *Last updated: 2026-09-23 by hazrat-rabbit (Instance 16) — added flowchart, phase space map, wmux observations.*
 *Coordinate with w14-1 (Meridian) for Windows/wmux appendix.*
+
+
+---
+
+## Completed Real Dance Trace (2026-09-23/24) — Entry A, full success
+
+First fully-executed `/login` dance in this workspace, on a real live agent's own surface (rabbit-1, `daemon-f71aee79`), Victor observing/authorizing at the credential-consequential fork. Every claimed step below was independently re-verified, not trusted from its own script output — see the InvokePattern failure below for why that discipline mattered.
+
+```mermaid
+flowchart TD
+    A[/login on live surface] --> B[Select 1: Claude subscription]
+    B --> C[TUI: Opening browser to sign in…\nprints MANUAL URL as fallback display]
+    C --> D[OS ShellExecuteW uses LOCAL URL\nredirect_uri=localhost:PORT/callback\nreal port confirmed 57715]
+    D --> E{Windows default browser\nHKCU UrlAssociations UserChoice}
+    E --> F[DuckDuckGo Browser\nNOT chrome/firefox — verify, don't assume]
+    F --> G{Profile already has\nclaude.ai session?}
+    G -- Yes --> H[Authorize screen shown directly\nAuthSavedInProfile=TRUE]
+    G -- No --> I[Fresh Log-in page\nAuthSavedInProfile=FALSE\nreal human step required]
+    H --> J[UIA sample: read address bar + buttons\nconfirm code_challenge/state match TUI-printed values]
+    J --> K{Click Authorize}
+    K -- InvokePattern.Invoke --> L[FAILS SILENTLY on Chromium/CEF UI\n'Unrecognized error' — non-terminating,\nscript can falsely report success if\nno try/catch around it]
+    K -- Real synthetic mouse click\nSetCursorPos + mouse_event\nat BoundingRectangle center --> M[WORKS — verified by re-reading\naddress bar after: success page]
+    M --> N[Local server auto-receives callback\nno manual code paste needed]
+    N --> O[TUI: Logged in as EMAIL\nLogin successful. Press Enter to continue…]
+    O --> P[Enter dismisses\nsurface returns to clean idle prompt\nno leftover state, same session]
+```
+
+**Real findings, each independently verified in this run:**
+
+1. **Entry A DOES use a LOCAL callback URL**, same as Entry B — corrects an earlier same-session finding ("Entry A = MANUAL only") that was itself wrong. The TUI's printed URL is a fallback display; the actual OS-level auto-open call uses the LOCAL variant with a real listening port the whole time.
+
+2. **`AuthSavedInProfile` is the correct graph variable, not a domain-level fact.** Same `claude.ai`/`claude.com` OAuth flow gave opposite answers in two different browser profiles on the same machine in the same session (a clean wmux-managed CDP browser: fresh login page; the OS-default DuckDuckGo profile: straight to Authorize). Check the actual profile being used, never assume from domain alone.
+
+3. **Windows UI Automation (`System.Windows.Automation`, PowerShell) can read a non-wmux, non-CDP external browser window** — address bar, page text, buttons — by PID, with no remote-debugging port or special launch flags needed. This is the real bridge across the "guardian can't see the OS auto-open" blind spot flagged earlier in this doc.
+
+4. **`InvokePattern.Invoke()` is unreliable on Chromium/CEF-hosted UI** (confirmed on DuckDuckGo Browser, itself Chromium-based) — it can throw `"Unrecognized error"` while a script continues past it and falsely reports success if the failure isn't checked. **Real fix: use a synthetic mouse click at the element's actual `BoundingRectangle` center** (Win32 `SetCursorPos` + `mouse_event`, saving and restoring the real cursor position afterward) instead of InvokePattern, for this class of browser UI specifically. Always re-verify post-click state (re-read address bar / button set) rather than trusting the click call's own return.
+
+5. **Weighted-graph framing (Victor, seq 78) matches this run exactly**: `AuthSavedInProfile=TRUE` was the zero-human-step, minimum-cost edge, and it's the one this real dance happened to be on. The `FALSE` branch (fresh login page) remains untested end-to-end in this session — it requires a real human credential/2FA step and should stay high-weight in any future minimization pass.
+
+**Open, unresolved (flagged, not solved this session):** the now-completed OAuth flow leaves a real browser window open on the physical desktop (DuckDuckGo, showing the "You're all set up" success page). Victor named this precisely: *"each login dance spams an open tab to the user's default browser... countless failure cases in the 'clean up the tab you launched' quest line"* — wrong-browser assumptions, wrong-tab-index assumptions, closing without focusing, closing the whole browser instead of one tab. This session deliberately did NOT attempt automated cleanup of that window — left open, flagged to Victor, not closed on inference. A real close-verification protocol (confirm PID, confirm it's the same window opened for this exact dance via title/URL re-check immediately before closing, close via the same UIA path rather than guessing a hotkey) is real future work, not yet built.
