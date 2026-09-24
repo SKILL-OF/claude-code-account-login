@@ -41,12 +41,18 @@ flowchart TD
     CLIBrowserAttempt -- Yes → tab visible\non desktop --> AuthPageDesktop[User sees claude.com auth page\nin their real browser\nOUTSIDE wmux visibility]
     CLIBrowserAttempt -- No → tab blocked\nor no browser --> ManualURL[TUI shows MANUAL URL:\nclaude.com/cai/oauth/authorize?...\n'Browser didn't open? Use URL below'\n'Paste code here if prompted >']
 
-    AuthPageDesktop --> PasteCodeFlow
-    ManualURL --> GuardianOpens[Guardian calls browser_open(MANUAL URL)\nto reach claude.com auth page]
+    CLIBrowserAttempt -- Yes → OS tab opened --> TabOrphan[⚠️ TabOrphan:\nOS-launched tab in user's default browser\nwmux browser_* tools CANNOT see it\nGuardian is blind to this tab]
+    TabOrphan --> SideEffectSubpath{Who completes\nauth in that tab?}
+    SideEffectSubpath -- Victor (human) handles it --> HumanAuth[Victor authenticates\nin DuckDuckGo tab\nplatform.claude.com shows code]
+    SideEffectSubpath -- Agent-driven CDP/UIAutomation --> AgentAutoPath[⚠️ Requires non-wmux OS tooling\nnot available on current toolchain]
+
+    HumanAuth --> PasteCodeFlow
+    ManualURL --> GuardianOpens[Guardian calls browser_open(MANUAL URL)\nwmux managed browser — fully visible]
     GuardianOpens --> PasteCodeFlow
 
     PasteCodeFlow[After auth: platform.claude.com\nreceives OAuth code\nPage shows code to user/guardian] --> DeliverCode[Guardian reads code from browser\nDelivers to TUI 'Paste code here' field\nvia terminal_send]
     DeliverCode --> TUIUnlocked_A[TUI completes PKCE exchange\nAuth complete]
+    TUIUnlocked_A --> TabCleanup[⚠️ TabCleanup quest:\nClose orphaned OS tab in default browser\nFailure modes: wrong browser, wrong tab,\nmultiple tabs, already navigated away,\nclosed whole browser instead of tab]
 ```
 
 **Evidence to date (2026-09-23):**
@@ -171,6 +177,8 @@ This is the path fully documented in README.md (Flow A / Flow B).
 9. **Do not collapse the default-browser variable** — The CLI uses Windows `ShellExecuteW(url)` which routes to whatever browser holds `HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice\ProgId`. On this machine that ProgId resolves to **DuckDuckGo Browser** (`DuckDuckGo.DesktopBrowser_0.172.4.0_x64`), not Chrome or Firefox. Pre-dance recon must read this registry key to know which browser to monitor. Checking for specific browser PIDs is an unchecked assumption — a grave sin in phase-space mapping.
 
 10. **Entry A uses code-paste, not curl-callback** — In Entry A (/login), the redirect_uri is `platform.claude.com/oauth/code/callback` (not localhost). After the user authorizes, platform.claude.com displays a code; the TUI prompts "Paste code here if prompted >". Guardian delivers the code via `terminal_send` to that prompt. No local server, no port reconstruction, no curl needed for Entry A.
+
+11. **Entry A tab-spam vs Entry B guardian control** — Entry A (`/login`) auto-launches a browser tab in the OS default browser (DuckDuckGo, Edge, whatever). That tab is outside wmux visibility and creates a tab cleanup burden with many failure modes. Entry B (`claude auth login --email` in a shell) does NOT auto-launch a browser — the guardian calls `browser_open(LOCAL_URL)` explicitly, has full lifecycle control, and closes the tab cleanly with `pane_close`. For agent-driven dances, Entry B is architecturally superior. Entry A's side-effect tab is only completable by the human (or non-wmux OS automation not on this toolchain).
 
 ---
 
