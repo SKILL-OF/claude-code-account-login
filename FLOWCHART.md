@@ -486,11 +486,47 @@ These nodes appear in the Phase Space Map and flowchart above but have NOT been 
 
 | Path | Status | What's needed |
 |---|---|---|
-| **Flow B / Gmail OAuth** — SwitchAccountFlow: click "Switch account" → Google account picker → select target → Allow | ❌ Abandoned 5+ times without completion | A real Dance 2 run through to credential write. Document the Google picker UI, intermediate redirect URLs, and any account-mismatch edge cases. |
-| **LoopbackTrap resolution** — browser signed in as current/old account, must sign out and sign in as target | ❌ Not tested end-to-end | Requires a real run where the browser has the wrong account. Document sign-out flow and re-auth path. |
+| **Flow B / Gmail OAuth** — SwitchAccountFlow: click "Switch account" → Google account picker → select target → Allow | ✅ **CONFIRMED 2026-09-24** — full real completion, dariensirius → ottopoet.thesean@gmail.com, `claude auth status` verified. See "Completed Gmail/Flow B Dance Trace" below for the full node-by-node path, including two real sub-blockers found and solved (Google picker click failure → keyboard-nav fix; SwitchAccountFlow landing on the general claude.ai login instead of the CLI's specific OAuth request → re-navigate-to-original-URL fix). | — |
+| **LoopbackTrap resolution** — browser signed in as current/old account, must sign out and sign in as target | ✅ **CONFIRMED 2026-09-24** — see trace below | — |
 | **AuthSavedInProfile=FALSE** — browser shows fresh login page, no saved session | ❌ Not tested (Dance 1 hit the TRUE branch) | Requires browser profile with no claude.ai cookies. Document credential entry, 2FA if any, re-auth flow. |
 | **Magic link 6-digit code delivery** — `MagicLink6Digit` state where link opens in wrong browser | ❌ Not tested | Requires environment where magic link opens in a browser different from the one with the LOCAL server tab. |
 | **CallbackBlocked fallback** — code+state URL parameters delivered manually via curl | ❌ Not tested | Requires environment where localhost redirect is blocked (firewall, corporate proxy). |
+
+---
+
+## Completed Gmail/Flow B Dance Trace (2026-09-24)
+
+First real, verified, end-to-end cross-account switch via the Google/Gmail path
+(dariensirius@protonmail.com → ottopoet.thesean@gmail.com), on `/login` (Entry A).
+Every step below was independently re-verified via `claude auth status` and/or
+rabbit-1's real TUI output — not trusted from any script's own printed text.
+
+```mermaid
+flowchart TD
+    Start[Fresh /login on rabbit-1's live surface] --> Menu[Option 1: Claude subscription]
+    Menu --> Locked[TUI locked, LOCAL URL generated, browser tab opens]
+    Locked --> Loop[BrowserAccountCheck: Logged in as dariensirius\nLOOPBACK TRAP — expected, browser still on old account]
+    Loop --> SwitchLink[Click 'Switch account' hyperlink\nmouse click WORKED here]
+    SwitchLink --> GeneralLogin["⚠️ Lands on claude.ai/login?from=logout\nGENERAL login, NOT the CLI's OAuth request\nReal gotcha: completing this only auths\nthe BROWSER to claude.ai, does not\ntouch the CLI's separate pending flow"]
+    GeneralLogin --> GoogleBtn[Click 'Continue with Google'\nmouse click WORKED here]
+    GoogleBtn --> Picker["Real Google account picker reached.\nottopoet.thesean@gmail.com IS listed —\nAuthAlreadySaved=TRUE confirmed for Google too"]
+    Picker --> MouseFail["❌ Mouse click on the ListItem FAILS silently\n3 attempts: Hyperlink target, ListItem target,\nexplicit mousemove-before-click — all failed\nUIA pattern check: ListItem supports ONLY\nScrollItemPattern, no SelectionItem/Invoke"]
+    MouseFail --> KbFix["✅ REAL FIX: keyboard navigation\nShift+Tab from page top until the target\naccount hyperlink is focused, then Enter.\nWorked first try."]
+    KbFix --> Consent["Real consent screen: 'You're signing back\nin to Claude' — Continue/Cancel buttons"]
+    Consent --> ContKb["Continue clicked via keyboard nav too\nTab-cycled from document focus to the\nContinue button, Enter"]
+    ContKb --> BrowserAuthed["Browser now fully authed to claude.ai\nas ottopoet.thesean — but CLI still\nwaiting, machine account still dariensirius"]
+    BrowserAuthed --> ReNav["Real fix: Ctrl+L to focus address bar,\ntype the ORIGINAL OAuth URL (its own\nclient_id+code_challenge+state), Enter.\nNote: Edit.ValuePattern.SetValue() is\nread-only on this control — must simulate\nreal typing via SendKeys, not direct set."]
+    ReNav --> RealAuthorize["Now shows real Authorize screen:\nLogged in as ottopoet.thesean@gmail.com\nsame code_challenge/state as original request"]
+    RealAuthorize --> ClickAuth[Click Authorize — atomic\nBringWindowToTop+SetForegroundWindow,\nno Alt-tap, focus-verified before+after]
+    ClickAuth --> CallbackBlocked["CallbackBlocked fires for real:\nbrowser lands on platform.claude.com/oauth/code/callback\nshowing a real code#state string,\nlocal redirect did not auto-complete"]
+    CallbackBlocked --> ManualDeliver["Guardian reads code via UIA,\ndelivers via terminal_send (2 small\ncalls, unsubmitted), verifies masked\ninput visible before Enter"]
+    ManualDeliver --> Done["claude auth status confirms\nottopoet.thesean@gmail.com\nTUI: Login successful\n/remote-control reconnects guardian"]
+```
+
+**Key takeaways for future dancers:**
+- The "Switch account" hyperlink on an OAuth-authorize page and the general `claude.ai` login are two different destinations with different consequences — completing the general login does NOT complete a pending CLI OAuth request. You must return to the original OAuth URL (full client_id/code_challenge/state) after the browser has the correct identity.
+- When a UIA element's `GetSupportedPatterns()` doesn't include `InvokePattern`/`SelectionItemPattern`, don't keep retrying coordinate clicks — check keyboard accessibility (Tab/Shift+Tab + Enter) as a first-class alternative, not a last resort.
+- `AutomationElement`'s Edit `ValuePattern.SetValue()` can be read-only even on a real address bar — use `Ctrl+L` + simulated typing + Enter instead of trying to set the value directly.
 
 ---
 
