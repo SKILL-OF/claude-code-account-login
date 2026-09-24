@@ -6,11 +6,53 @@ They must stay in sync — a new divergence documented here needs a correspondin
 
 ---
 
-## Full Decision Tree
+## Entry Points: Two Distinct Graphs
+
+These are NOT the same entry point. They live in different contexts and are interpreted by different systems.
+
+| Entry | Where it runs | Who interprets it |
+|---|---|---|
+| `/login` (slash command) | Claude Code chat input box (TUI) | Claude Code harness |
+| `claude auth login --email ACCOUNT` | Shell (PowerShell/bash) | Operating system + claude CLI |
+
+**`/login` cannot be run in a shell.** `/login` at a PowerShell/bash prompt = `C:\login` (filesystem path). **`claude auth login` cannot be run in a Claude Code chat box.** It is a shell command, not a slash command.
+
+The two entry paths may converge at common nodes (OAuthPage, CallbackCheck, etc.) but they START in different contexts.
+
+---
+
+## Entry A: `/login` slash command (in a running Claude Code session)
 
 ```mermaid
 flowchart TD
-    Start([Quota warning triggered]) --> Triage{5h > 80%\nor 7d > 97%?}
+    EntryA([/login slash command\nin Claude Code chat input]) --> AlreadyAuth{Session already\nauthenticated?}
+    AlreadyAuth -- Yes --> LoginConfirmed[Login successful\nfast path — no TUI lock\nno browser\nno OAuth]
+    AlreadyAuth -- No --> AccountPicker{/login shows\naccount picker?}
+    AccountPicker -- Yes → picker shown --> SelectAccount[Select target account\nfrom list]
+    AccountPicker -- No → goes direct --> LoginInitiated_A
+    SelectAccount --> LoginInitiated_A[TUI LOCKED\nOAuth flow begins]
+    LoginInitiated_A --> SharedFlow([→ join Entry B at URLsGenerated])
+```
+
+**Evidence to date (2026-09-23):**
+- `AlreadyAuth → Yes → LoginConfirmed` **[CONFIRMED]**: sent `/login` to rabbit-1's Claude Code session, received "Login successful" immediately, no TUI lock, no browser.
+- `AccountPicker` branch **[THEORY — not yet observed]**: requires unauthenticated session to reach.
+
+---
+
+## Entry B: `claude auth login --email` (in a shell)
+
+```mermaid
+flowchart TD
+    EntryB([claude auth login\n--email ACCOUNT\nin shell]) --> LoginInitiated_B[TUI LOCKED\nCLI outputs LOCAL + MANUAL URLs]
+    LoginInitiated_B --> SharedFlow2([→ join at URLsGenerated])
+```
+
+This is the path fully documented in README.md (Flow A / Flow B).
+
+---
+
+## Full Decision Tree (from quota warning through shared flow)
     Triage -- No --> Monitor[Collect sample\ncontinue monitoring]
     Triage -- Yes --> Score[Score all 4 accounts\nby headroom]
 
