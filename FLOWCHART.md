@@ -308,6 +308,28 @@ This is the path fully documented in README.md (Flow A / Flow B).
 
 25. **GooglePickerClickFails — Win32 mouse_event does not register on Google's Material Design account picker** `[Windows]` — `accounts.google.com/v3/signin/accountchooser` uses Google Material Design list items that do not fire click events from Win32-level `SetCursorPos + mouse_event`. Three attempts failed: targeting the Hyperlink element, the parent ListItem, and with explicit prior mousemove-to-neutral (to trigger hover-gated JS handlers). Focus verified correct before each attempt; page unchanged after each. **Known alternatives to try**: (1) Keyboard navigation — Tab to account entry, Enter to select (avoids click entirely; Google picker is fully keyboard-navigable); (2) `MOUSEEVENTF_LEFTDOWN` + `MOUSEEVENTF_LEFTUP` dispatched as separate events rather than combined; (3) Click on the Text child sub-element of the ListItem (more precise hit-testable target). (2026-09-23 Dance 2 live discovery, Meridian seq 180 — SwitchAccountFlow confirmed to this point; this is the new frontier)
 
+26. **Two-path RC state machine — `/login` and credential file swap are completely different** — These two account-switch methods produce entirely different RC states and require entirely different recovery procedures. **Do not use the same sweep for both.**
+
+  | Switch method | RC session state after switch | Sessions tell the truth? | Correct RC recovery |
+  |---|---|---|---|
+  | `/login` dance (Flow A/B) | All sessions receive "RC disconnected" banner, drop from ListAgents | ✅ Yes — they know they're disconnected | Unconditional `/remote-control` blast to every pane showing `/rc failed` |
+  | Credential file swap (`~/.claude/.credentials.json` overwrite) | No banner, no visual change. Sessions show "active" in TUI and ListAgents | ❌ **No — they lie** | Force-disconnect → reconnect on every affected session |
+
+  **The lie:** After a file swap, sessions still hold an open RC stream — to the OLD account. They ARE connected, just to the wrong stream. Sending `/remote-control` shows the "active session" TUI with "Disconnect / Show QR / Continue" options — appearing healthy. Selecting "Continue" leaves the session silently bound to the old account. Victor cannot see the session in the remote app under the new account.
+
+  **Post-swap mandatory RC fix sequence** (per session sharing the swapped global credentials):
+  1. Send `/remote-control` → TUI shows "active" (the lie)
+  2. Navigate to **Disconnect**: UP × 2, ENTER (cursor starts at "Continue" at bottom; layout is Disconnect top, Show QR middle, Continue bottom)
+  3. TUI dismisses — old stream cleanly broken
+  4. Send `/remote-control` again → new TUI connects to new account's stream
+  5. ENTER to confirm → session is live on new account
+
+  **TUI blind-navigation doctrine** (confirmed 2026-10-09, instance 80): `terminal_read` cannot see the RC TUI. The TUI renders in the pty but does not appear in terminal_read output. This is expected and must not block action. Send navigation keys blind. Trust the sequence. A `/remote-control` queued while inference is running fires when inference ends — the TUI appears then, blocking until navigated. **Critically: do NOT schedule a ScheduleWakeup to fire while a TUI may be showing** — a blocking TUI prevents stdin processing; the wakeup fires into a frozen terminal and the session cannot recover without human intervention. The entire disconnect → reconnect sequence must complete in one continuous inference turn.
+
+  **Receiving a message = no TUI is showing** (mutual exclusion): when an agent receives a message from Victor or another agent (chatbox receives input), the RC TUI is provably not blocking. These states are mutually exclusive. If Victor mentions a TUI, it is already past — the session is clean.
+
+  Confirmed 2026-10-09 instance 79-80 (hazrat-rabbit): credential swap to aurora at tick-15 left both rabbit-0 and Meridian silently bound to old sharksandwich RC stream for ~7h. Fixed by force-disconnect → reconnect on both daemons.
+
 ---
 
 ## Email Inbox Navigation Sub-Flow (TabProvenance + MagicLinkAge detail)

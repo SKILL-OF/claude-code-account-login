@@ -179,6 +179,76 @@ Rotation: A → B → C → A. With ~3hr cycles, A's 5hr quota resets by the tim
 
 ---
 
+## Flow C: Credential File Swap (Fast-Path)
+
+A fast alternative to the full `/login` dance. Instead of the browser/OAuth flow, the coordinator overwrites the global credentials file directly:
+
+```powershell
+# Swap to a target account whose credentials are already saved locally
+Copy-Item "C:\Users\<user>\_\AS\<account>\.claude\.credentials.json" `
+          "C:\Users\<user>\.claude\.credentials.json" -Force
+```
+
+**When to use:** A pre-saved account's `.credentials.json` is available and the refreshToken is still valid (~29 days). This skips the TUI lock, browser interaction, and OAuth entirely.
+
+**Trade-off:** The swap is silent — the runtime does not know the credentials changed. See the mandatory RC recovery below.
+
+```mermaid
+stateDiagram-v2
+    [*] --> QuotaWarning
+
+    QuotaWarning --> SelectAccount : quota approaching trigger threshold
+    SelectAccount --> CredFileCheck : target account has saved credentials?
+
+    CredFileCheck --> FileSwap : Yes — .credentials.json available and fresh (<29d)
+    CredFileCheck --> FlowA_or_B : No — must use /login dance (Flow A or B)
+
+    FileSwap --> SwapComplete : overwrite ~/.claude/.credentials.json\nwith target account's credentials
+    note right of SwapComplete
+        No banner. No TUI lock. No browser.
+        Runtime does not know credentials changed.
+        Status bar takes ~60s to update.
+        All sessions silently bound to old RC stream.
+    end note
+
+    SwapComplete --> StatusVerify : wait ~60s, read status-cache\nfiveHour/sevenDay reflect new account?
+    StatusVerify --> SwapConfirmed : Yes — new account numbers visible
+    StatusVerify --> SwapFailed : No — same numbers as before → retry or use /login
+
+    SwapConfirmed --> RCFixRequired : ⚡ ALL sessions sharing global credentials\nare now lying about RC state\nMUST force-disconnect → reconnect
+
+    RCFixRequired --> RCFixEach : for each session (rabbit-0, Meridian, all shared-global agents)
+    RCFixEach --> SendRC : send /remote-control
+    SendRC --> TUIAppears : TUI shows "active" — THIS IS THE LIE
+    TUIAppears --> NavigateDisconnect : UP × 2, ENTER\n(cursor at Continue/bottom;\nDisconnect at top)
+    NavigateDisconnect --> Disconnected : old stream broken
+    Disconnected --> SendRC2 : send /remote-control again
+    SendRC2 --> TUIAppears2 : reconnect TUI appears
+    TUIAppears2 --> NavigateConnect : ENTER to confirm
+    NavigateConnect --> RCLive : session live on new account's RC stream
+
+    RCLive --> MoreSessions : more sessions to fix?
+    MoreSessions --> RCFixEach : Yes
+    MoreSessions --> SwapDone : No
+
+    SwapDone --> [*]
+```
+
+### Critical: TUI navigation is blind
+
+`terminal_read` cannot see the RC TUI. The TUI renders in the pty but is invisible to `terminal_read`. This is expected — **act blind, trust the key sequence**:
+
+1. Send `/remote-control` → TUI fires when terminal processes stdin (may queue behind current inference, fires when inference ends)
+2. Send UP, UP, ENTER — these navigate to "Disconnect this session" and confirm
+3. Send `/remote-control` again → reconnect TUI
+4. Send ENTER — confirms connection
+
+**All steps must complete in one continuous inference turn.** A `ScheduleWakeup` fired while a blocking TUI is showing freezes the session — the TUI blocks stdin, the wakeup cannot be processed. There is no recovery without human intervention.
+
+**Mutual exclusion check:** If you are receiving messages (chatbox is open), no TUI is currently blocking. The RC TUI and an open chatbox are mutually exclusive. Any TUI mentioned in a message is already past.
+
+---
+
 ## Appendix: Windows / wmux Implementation
 
 Platform-specific details for agents running in the wmux harness on Windows 11.
