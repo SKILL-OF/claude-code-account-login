@@ -29,7 +29,7 @@ Use the LOCAL URL. The browser follows the redirect to localhost automatically.
 
 ---
 
-## State Machine — Flow A: Non-Gmail (magic link accounts)
+## State Machine — Flow A: Non-Gmail (email verification / magic link accounts)
 
 ```mermaid
 stateDiagram-v2
@@ -302,6 +302,73 @@ Invoke-WebRequest -Uri "http://[::1]:${PORT}/callback?code=${CODE}&state=${STATE
 ### Guardian timing note
 
 The wmux TUI lock means `terminal_read` will show static output — the last lines before the lock. Poll repeatedly. The log lines containing URLs appear within ~2 seconds of running `claude auth login`.
+
+### DuckDuckGo UIA Detection (Windows, confirmed 2026-10-11)
+
+DuckDuckGo Browser does **not** appear as `"DuckDuckGo"` in UIA root window-name enumeration. Its root `AutomationElement.Current.Name = "NoAutomationPeer"`. Window-name `FindAll` returns 0 results.
+
+**Correct detection — by process name, not window name:**
+```powershell
+$proc = Get-Process DuckDuckGo -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -ne '' } |
+        Select-Object -First 1
+$hwnd = [IntPtr]$proc.MainWindowHandle
+$ddgWin = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+# Now FindAll descendants from $ddgWin as normal
+```
+
+**AttachThreadInput for cross-process focus (required for DDG):**
+
+Plain `SetForegroundWindow($hwnd)` returns False cross-process against DDG. Required sequence:
+```powershell
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public class DDGUIA {
+    [DllImport("user32.dll")] public static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
+    [DllImport("kernel32.dll")] public static extern int GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(int a, int b, bool f);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr i, int x, int y, int w, int ht, int f);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);
+}
+'@
+$pid2 = 0
+$targetTid = [DDGUIA]::GetWindowThreadProcessId($hwnd, [ref]$pid2)
+$myTid    = [DDGUIA]::GetCurrentThreadId()
+[DDGUIA]::AttachThreadInput($myTid, $targetTid, $true)
+[DDGUIA]::ShowWindow($hwnd, 9)        # SW_RESTORE
+[DDGUIA]::BringWindowToTop($hwnd)
+[DDGUIA]::SetForegroundWindow($hwnd)
+Start-Sleep -Milliseconds 150
+[DDGUIA]::AttachThreadInput($myTid, $targetTid, $false)
+```
+
+**Authorize button — topmost + coordinate click (InvokePattern fails on DDG/CEF):**
+```powershell
+$HWND_TOPMOST   = [IntPtr](-1); $HWND_NOTOPMOST = [IntPtr](-2)
+$SWP_FLAGS = 0x0003   # SWP_NOSIZE | SWP_NOMOVE
+[DDGUIA]::SetWindowPos($hwnd, $HWND_TOPMOST, 0, 0, 0, 0, $SWP_FLAGS)
+[DDGUIA]::SetCursorPos($cx, $cy)
+[DDGUIA]::mouse_event(2, 0, 0, 0, 0)    # MOUSEEVENTF_LEFTDOWN
+Start-Sleep -Milliseconds 80
+[DDGUIA]::mouse_event(4, 0, 0, 0, 0)    # MOUSEEVENTF_LEFTUP
+Start-Sleep -Milliseconds 500
+[DDGUIA]::SetWindowPos($hwnd, $HWND_NOTOPMOST, 0, 0, 0, 0, $SWP_FLAGS)
+```
+`InvokePattern.Invoke()` fails **silently** on DuckDuckGo (Chromium/CEF) — it may throw `"Unrecognized error"` as a non-terminating exception while the script continues and falsely reports success if not checked. Coordinate click is the only reliable mechanism. (Confirmed 2026-10-11, hazrat-rabbit instance 83.)
+
+### Auth Method Selection: Gmail vs non-Gmail (confirmed 2026-10-11)
+
+When `AuthSavedInProfile=FALSE` (sign-in page shown), the UI presents two auth method buttons:
+- **"Continue with Google"** — Gmail accounts only (`@gmail.com`). For any other address, Google returns "Couldn't find this account."
+- **"Continue with email"** — Any email address. Sends a 6-digit verification code to the inbox.
+
+**Rule:** if account email is `@gmail.com` → "Continue with Google" (Flow B); if non-Gmail → "Continue with email" → enter email → enter 6-digit code from inbox → OAuthPage.
+
+This is NOT domain-specific — `@protonmail.com`, `@aurora.wordgarden.dev`, and all custom domains are non-Gmail and must use "Continue with email". The only exception is actual Gmail addresses. (Confirmed 2026-10-11, claude.anthropic@aurora.wordgarden.dev dance.)
 
 ---
 

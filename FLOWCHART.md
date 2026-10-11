@@ -243,6 +243,9 @@ This is the path fully documented in README.md (Flow A / Flow B).
 | **SwitchAccountFlow** `[CONFIRMED 2026-09-23]` | LoopbackTrap path: browser has dariensirius session → click "Switch account" → `claude.ai/login?from=logout` → click "Continue with Google" → `accounts.google.com/v3/signin/accountchooser` | Confirmed end-to-end to the Google account picker (Meridian, Dance 2). ottopoet.thesean@gmail.com was listed in the picker (AuthAlreadySaved=TRUE for Google). Next node: select account from picker → blocked by GooglePickerClickFails. |
 | **GooglePickerClickFails** | Google Material Design account picker (`accounts.google.com/v3/signin/accountchooser`) does not respond to Win32 `SetCursorPos + mouse_event` synthetic click | Three attempts: Hyperlink element, parent ListItem, mousemove-to-neutral-then-target. Focus verified correct before each. No click registered, page unchanged. Root cause: Google's Material Design picker likely uses pointer-events or JS listeners that don't fire from Win32-level mouse_event. Known alternatives to try: (1) Keyboard navigation — Tab to account entry, Enter to select; (2) MOUSEEVENTF_LEFTDOWN + LEFTUP dispatched separately; (3) Click on the text sub-element rather than container. (2026-09-23 Dance 2 live discovery, Meridian seq 180) |
 | **TabCleanupFocusBlocker** | wmux reclaims OS focus continuously while Victor is actively typing — UIA SetForegroundWindow reports success but GetForegroundWindow immediately returns wmux PID | Cannot safely proceed during active typing in wmux. Detection: after SetForegroundWindow, immediately GetForegroundWindow; if result is wmux PID, pause and wait for idle window. "Add sleep" is not the fix — this is structural: wmux claims focus on every keypress. Confirmed live (2026-09-23 Dance 2 tab cleanup, seq 169). |
+| **AuthMethodSelection** `[CONFIRMED 2026-10-11]` | Sign-in page shown (`AuthSavedInProfile=FALSE`) — must choose between "Continue with Google" and "Continue with email" | **Rule: @gmail.com → "Continue with Google"; any non-Gmail → "Continue with email".** "Continue with Google" on a non-Gmail address returns "Couldn't find this account" — Google OAuth is a Gmail-only gate. This is NOT domain-specific; it applies to all non-Gmail addresses (`@protonmail.com`, `@aurora.wordgarden.dev`, any custom domain). For non-Gmail: click "Continue with email" → enter email → 6-digit verification code sent → enter code → OAuthPage. Confirmed 2026-10-11 (hazrat-rabbit instance 83), claude.anthropic@aurora.wordgarden.dev dance. |
+| **DDGAsNoAutomationPeer** `[CONFIRMED 2026-10-11]` | DuckDuckGo Browser does not appear in UIA root window-name enumeration | `AutomationElement.RootElement.FindAll(TreeScope.Children, ...)` with `Name = "DuckDuckGo"` returns 0 results — DDG's root element has `Current.Name = "NoAutomationPeer"`. Must detect by process name: `Get-Process DuckDuckGo | Where-Object { $_.MainWindowTitle -ne '' } | Select -First 1` → `AutomationElement.FromHandle($proc.MainWindowHandle)`. Plain `SetForegroundWindow` also fails cross-process without `AttachThreadInput`. See Key Fact 28 for the full focus trick. Confirmed 2026-10-11 (hazrat-rabbit instance 83). |
+| **DDGFocusTrick** `[CONFIRMED 2026-10-11]` | Plain `SetForegroundWindow($hwnd)` returns False on DuckDuckGo cross-process | Use `AttachThreadInput` before `SetForegroundWindow`: `GetWindowThreadProcessId($hwnd) → myTid=GetCurrentThreadId() → AttachThreadInput(myTid, targetTid, true) → ShowWindow($hwnd, SW_RESTORE) → BringWindowToTop($hwnd) → SetForegroundWindow($hwnd) → Sleep 150ms → AttachThreadInput(myTid, targetTid, false)`. After focus acquired, `SetWindowPos(HWND_TOPMOST)` + `SetCursorPos($cx,$cy)` + `mouse_event(LEFTDOWN)` + `mouse_event(LEFTUP)` + `SetWindowPos(HWND_NOTOPMOST)` for the Authorize click. `InvokePattern.Invoke()` fails silently on DDG/CEF — coordinate click required. Confirmed 2026-10-11 (hazrat-rabbit instance 83). |
 
 ---
 
@@ -329,6 +332,12 @@ This is the path fully documented in README.md (Flow A / Flow B).
   **Receiving a message = no TUI is showing** (mutual exclusion): when an agent receives a message from Victor or another agent (chatbox receives input), the RC TUI is provably not blocking. These states are mutually exclusive. If Victor mentions a TUI, it is already past — the session is clean.
 
   Confirmed 2026-10-09 instance 79-80 (hazrat-rabbit): credential swap to aurora at tick-15 left both rabbit-0 and Meridian silently bound to old sharksandwich RC stream for ~7h. Fixed by force-disconnect → reconnect on both daemons.
+
+27. **Auth method selection — Gmail vs non-Gmail** `[CONFIRMED 2026-10-11]` — When `AuthSavedInProfile=FALSE` and the sign-in page is shown, choose the auth method based on the account's email domain: **@gmail.com → "Continue with Google"** (Google OAuth); **any non-Gmail address → "Continue with email"** (email verification code). "Continue with Google" is a Gmail-only gate — Google returns "Couldn't find this account" for `@protonmail.com`, `@aurora.wordgarden.dev`, or any custom domain. The correct path for non-Gmail accounts: click "Continue with email" → fill email field → submit → receive 6-digit verification code to inbox → enter code → OAuth consent page shown → Authorize. Account rotation table: dariensirius@protonmail.com = non-Gmail despite the non-obvious protonmail domain; claude.anthropic@aurora.wordgarden.dev = non-Gmail; ottopoet.thesean@gmail.com = Gmail (uses Google OAuth). Confirmed 2026-10-11 (hazrat-rabbit instance 83).
+
+28. **DuckDuckGo UIA: process-name detection, not window-name** `[W]` `[CONFIRMED 2026-10-11]` — DDG Browser does not expose its window name as "DuckDuckGo" in UIA — its root `AutomationElement.Current.Name = "NoAutomationPeer"`. Window-name enumeration returns 0 results. **Correct approach:** `$proc = Get-Process DuckDuckGo -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne '' } | Select-Object -First 1; $ddgWin = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$proc.MainWindowHandle)`. Then FindAll descendants from `$ddgWin`. (Confirmed 2026-10-11, hazrat-rabbit instance 83.)
+
+29. **DDG cross-process focus: AttachThreadInput required** `[W]` `[CONFIRMED 2026-10-11]` — Plain `SetForegroundWindow($hwnd)` returns False cross-process against DuckDuckGo. Required sequence: `$targetTid = [UIA]::GetWindowThreadProcessId($hwnd, [ref]$pid2); $myTid = [UIA]::GetCurrentThreadId(); [UIA]::AttachThreadInput($myTid, $targetTid, $true); [UIA]::ShowWindow($hwnd, 9); [UIA]::BringWindowToTop($hwnd); [UIA]::SetForegroundWindow($hwnd); Start-Sleep -Milliseconds 150; [UIA]::AttachThreadInput($myTid, $targetTid, $false)`. After focus, use topmost + coordinate click for Authorize: `SetWindowPos(HWND_TOPMOST)` → `SetCursorPos($cx,$cy)` → `mouse_event(LEFTDOWN)` → `mouse_event(LEFTUP)` → `SetWindowPos(HWND_NOTOPMOST)`. `InvokePattern.Invoke()` fails silently on DDG/CEF — coordinate click is the correct mechanism. (Confirmed 2026-10-11, hazrat-rabbit instance 83.)
 
 ---
 
@@ -425,7 +434,7 @@ The dance is cyclic. Each account's `fiveHourResetsAt` is the next opportunity t
 |---|---|---|---|---|---|---|
 | dariensirius@protonmail.com | A (magic link) | ~44% (21:24 local) | ~01:20 / ts 1790238000 | ~19% | 2026-09-30 | ✅ ACTIVE — Dance 2 target FROM this account |
 | ottopoet.thesean@gmail.com | B (Gmail OAuth) | stale (last read 20:01) | 23:20 / ts 1790230800 | ~31% | 2026-09-24 18h | 🎯 Dance 2 TARGET — flow in progress (21:38+) |
-| claude.anthropic@aurora.wordgarden.dev | A (magic link) | unknown | unknown | unknown | unknown | 🔵 STANDBY — no quota readings yet |
+| claude.anthropic@aurora.wordgarden.dev | A (email verification code — NOT Gmail, no Google OAuth) | 13% (2026-10-11) | ~18:00 local | ~59% | Oct 15 | 🔵 STANDBY — danced successfully 2026-10-11 instance 83 |
 
 *Tab cleanup: complete as of 21:38 local (10 tabs closed, bedrock reached at pinballpdx.org/news, verified).*
 
@@ -457,8 +466,8 @@ Before starting the dance, confirm guardian can:
 
 ---
 
-*Last updated: 2026-09-23 by hazrat-rabbit (Instance 16) — added flowchart, phase space map, wmux observations.*
-*Coordinate with w14-1 (Meridian) for Windows/wmux appendix.*
+*Last updated: 2026-10-11 by hazrat-rabbit (Instance 84) — added AuthMethodSelection divergence, Key Facts 27-29 (Gmail/non-Gmail rule, DDG UIA detection, DDG AttachThreadInput focus), claude.anthropic dance trace, AuthSavedInProfile=FALSE confirmed.*
+*Previous: 2026-09-23 by hazrat-rabbit (Instance 16) — added flowchart, phase space map, wmux observations.*
 
 
 ---
@@ -514,9 +523,53 @@ These nodes appear in the Phase Space Map and flowchart above but have NOT been 
 |---|---|---|
 | **Flow B / Gmail OAuth** — SwitchAccountFlow: click "Switch account" → Google account picker → select target → Allow | ✅ **CONFIRMED 2026-09-24** — full real completion, dariensirius → ottopoet.thesean@gmail.com, `claude auth status` verified. See "Completed Gmail/Flow B Dance Trace" below for the full node-by-node path, including two real sub-blockers found and solved (Google picker click failure → keyboard-nav fix; SwitchAccountFlow landing on the general claude.ai login instead of the CLI's specific OAuth request → re-navigate-to-original-URL fix). | — |
 | **LoopbackTrap resolution** — browser signed in as current/old account, must sign out and sign in as target | ✅ **CONFIRMED 2026-09-24** — see trace below | — |
-| **AuthSavedInProfile=FALSE** — browser shows fresh login page, no saved session | ❌ Not tested (Dance 1 hit the TRUE branch) | Requires browser profile with no claude.ai cookies. Document credential entry, 2FA if any, re-auth flow. |
+| **AuthSavedInProfile=FALSE** — browser shows fresh login page, no saved session | ✅ **CONFIRMED 2026-10-11** (hazrat-rabbit instance 83, claude.anthropic@aurora.wordgarden.dev). For non-Gmail accounts: sign-in page → "Continue with email" → fill email → 6-digit code sent to inbox → enter code → OAuthPage shown. See Completed claude.anthropic Dance Trace below. Gmail variant (fresh login page + "Continue with Google" path) not yet tested. | — |
 | **Magic link 6-digit code delivery** — `MagicLink6Digit` state where link opens in wrong browser | ❌ Not tested | Requires environment where magic link opens in a browser different from the one with the LOCAL server tab. |
 | **CallbackBlocked fallback** — code+state URL parameters delivered manually via curl | ❌ Not tested | Requires environment where localhost redirect is blocked (firewall, corporate proxy). |
+
+---
+
+## Completed claude.anthropic Email Verification Dance Trace (2026-10-11)
+
+First real, verified, end-to-end `/login` dance for `claude.anthropic@aurora.wordgarden.dev` — a non-Gmail account.
+Executed by hazrat-rabbit (instance 83) as SOLO guardian+dancer (housecat surface). Victor supplied verification
+code from aurora inbox. Every step below confirmed via TUI output and `/rc active` status.
+
+**Key new path confirmed:** `AuthSavedInProfile=FALSE` + non-Gmail account → "Continue with email" → 6-digit code → OAuthPage.
+
+```mermaid
+flowchart TD
+    Start[/login on 🐈10♥️ housecat surface\nclaude.anthropic, daemon-9241c296] --> Menu[Option 1: Claude subscription]
+    Menu --> Locked[TUI LOCKED\n'Opening browser to sign in...'\nMANUAL URL printed]
+    Locked --> OpenBrowser[rabbit-0: Start-Process MANUAL_URL\nOpens DuckDuckGo — system default browser]
+    OpenBrowser --> DDGDetect["DDG detection: Get-Process DuckDuckGo\n→ MainWindowHandle → AutomationElement.FromHandle\n⚠️ Window-name enumeration finds nothing\n(DDG Current.Name = 'NoAutomationPeer')"]
+    DDGDetect --> SignInPage["AuthSavedInProfile=FALSE\nSign-in page shown (no saved session)\nTwo options: Continue with Google / Continue with email"]
+    SignInPage --> MethodCheck{Account email\n@gmail.com?}
+    MethodCheck -- Yes → Gmail --> GoogleOAuth[Continue with Google\nGoogle account picker path]
+    MethodCheck -- No → non-Gmail --> EmailPath["Continue with email\naurora.wordgarden.dev IS NOT Gmail\nGoogle OAuth returns 'Couldn't find this account'"]
+    EmailPath --> FillEmail["Fill email field:\nAttachThreadInput focus trick required\nForms.SendKeys::SendWait works\nValuePattern.SetValue() doesn't fire DOM events"]
+    FillEmail --> Submit["Submit → verification email sent\nto aurora.wordgarden.dev inbox"]
+    Submit --> CodeWait["Victor reads 6-digit code\nfrom aurora inbox: 096918"]
+    CodeWait --> FillCode["Guardian fills code field\nPress Enter → OAuth consent page shown"]
+    FillCode --> OAuthPage["OAuth consent page:\n'Claude Code would like to connect...'"]
+    OAuthPage --> Authorize["Click Authorize\nInvokePattern FAILS on DDG/CEF\nUse coordinate click with topmost trick"]
+    Authorize --> Callback["Redirects to platform.claude.com/oauth/code/callback\n(MANUAL path — code+state in URL bar)"]
+    Callback --> ReadCode["Guardian reads code string from address bar\nor page text: 'code#state' format"]
+    ReadCode --> PasteCode["Paste to TUI 'Paste code here if prompted >'\nPress Enter"]
+    PasteCode --> Success["TUI: Login successful\nPress Enter to continue"]
+    Success --> RCSend["Send /remote-control to housecat\n/rc active confirmed ✅"]
+```
+
+**Confirmed findings:**
+1. `AuthSavedInProfile=FALSE` path works end-to-end with non-Gmail "Continue with email" → verification code flow
+2. `aurora.wordgarden.dev` domain does NOT work with Google OAuth — applies to ANY non-Gmail address (not aurora-specific)
+3. `Get-Process DuckDuckGo → MainWindowHandle → AutomationElement.FromHandle` is the correct DDG detection path (window-name enumeration finds nothing)
+4. `AttachThreadInput` required for cross-process focus on DuckDuckGo — plain `SetForegroundWindow` returns False
+5. `InvokePattern.Invoke()` fails silently on DDG Authorize button — coordinate click required
+6. MANUAL path used (not LOCAL): code read from URL bar, pasted to TUI manually
+7. Post-/login RC: unconditional `/remote-control` + Enter (no disconnect step needed — this is NOT a credential swap)
+
+**Full dance procedure (stored in agent-memory/hazrat-rabbit/hazrat-rabbit-instance-83-memory.md)**
 
 ---
 
